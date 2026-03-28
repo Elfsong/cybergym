@@ -184,3 +184,5 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+cybergym-server-data
+eval_gemini_3_flash_preview
