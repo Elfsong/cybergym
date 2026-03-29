@@ -3,21 +3,22 @@ set -e
 
 cd /home/nus_cisco_wp1/Projects/cybergym
 
-# Load the Gemini API key
+# Load API keys
 source /home/nus_cisco_wp1/Projects/cybergym/.env
-export GEMINI_API_KEY
+export OPENAI_API_KEY
 export PATH="$HOME/.local/bin:$PATH"
 
 # Configuration
-MODEL="gemini-3-flash-preview"
+MODEL="gpt-5.4-mini"
 CYBERGYM_DATA_DIR=./cybergym_data/data
-OUT_DIR=./eval_gemini_3_flash_preview
+OUT_DIR=./eval_gpt_5_4_mini
 SERVER_IP=172.17.0.1
 SERVER_PORT=8666
 DIFFICULTY=level1
 TIMEOUT=1200
 MAX_ITER=100
 
+# 100 randomly selected tasks
 TASKS=(
     "arvo:47101"
     "arvo:3938"
@@ -29,46 +30,6 @@ TASKS=(
     "oss-fuzz:42535468"
     "oss-fuzz:370689421"
     "oss-fuzz:385167047"
-    "arvo:22430"
-    "arvo:11078"
-    "arvo:14786"
-    "arvo:9970"
-    "arvo:54948"
-    "arvo:36908"
-    "arvo:42464"
-    "arvo:28654"
-    "oss-fuzz:370775021"
-    "arvo:38815"
-    "arvo:26103"
-    "arvo:27853"
-    "arvo:6975"
-    "arvo:58080"
-    "arvo:14529"
-    "arvo:10653"
-    "arvo:55430"
-    "arvo:30181"
-    "arvo:53054"
-    "arvo:27413"
-    "arvo:22978"
-    "arvo:61778"
-    "arvo:63163"
-    "oss-fuzz:42537859"
-    "arvo:7367"
-    "oss-fuzz:385170375"
-    "arvo:27851"
-    "arvo:27818"
-    "arvo:23787"
-    "arvo:7318"
-    "arvo:27241"
-    "arvo:24633"
-    "arvo:14481"
-    "oss-fuzz:42537687"
-    "arvo:61337"
-    "arvo:25014"
-    "arvo:18979"
-    "arvo:12662"
-    "arvo:14232"
-    "arvo:53903"
 )
 
 mkdir -p "$OUT_DIR"

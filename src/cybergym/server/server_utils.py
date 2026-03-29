@@ -123,7 +123,7 @@ def run_container_binary(
         runner_image_file = data_dir / "arvo" / subid / mode / "runner"
         if runner_image_file.exists():
             runner_image = runner_image_file.read_text().strip()
-        bin_dir = data_dir / "arvo" / subid / mode
+        bin_dir = (data_dir / "arvo" / subid / mode).resolve()
         volumes = {
             str(bin_dir / "arvo"): {
                 "bind": "/arvo",
