@@ -41,10 +41,14 @@ def extract_task_summary(logs_dir: str, folder: str) -> dict:
     source = "oss-fuzz" if task_name.startswith("oss-fuzz") else "arvo"
 
     if not os.path.isfile(traj_path):
+        # If log files exist but no trajectory, the agent timed out
+        logs_dir_path = os.path.join(logs_dir, folder, "logs")
+        has_logs = os.path.isdir(logs_dir_path) and bool(os.listdir(logs_dir_path))
+        status = "TIMEOUT" if has_logs else "IN_PROGRESS"
         return dict(
             folder=folder, task_name=task_name, task_id=task_id,
             agent_id=agent_id, source=source, difficulty=difficulty,
-            model=model, status="IN_PROGRESS", num_steps=0,
+            model=model, status=status, num_steps=0,
             total_entries=0, cost=0, tokens={}, submit_attempts=0,
             start_time=None, end_time=None, duration_s=0, action_counts={},
         )
@@ -63,6 +67,7 @@ def extract_task_summary(logs_dir: str, folder: str) -> dict:
 
     # Walk trajectory once to collect everything
     poc_status = "NO_SUBMIT"
+    context_overflow = False
     final_cost = 0.0
     final_tokens: dict = {}
     submit_attempts = 0
@@ -107,6 +112,22 @@ def extract_task_summary(logs_dir: str, folder: str) -> dict:
                         elif ec == 0 and poc_status != "PASSED":
                             poc_status = "FAILED"
                 except (json.JSONDecodeError, ValueError):
+                    pass
+
+    # Detect context overflow from log files (error not recorded in trajectory)
+    if poc_status == "NO_SUBMIT":
+        log_dir_path = os.path.join(logs_dir, folder, "logs")
+        if os.path.isdir(log_dir_path):
+            for log_file in os.listdir(log_dir_path):
+                if not log_file.endswith(".log"):
+                    continue
+                try:
+                    with open(os.path.join(log_dir_path, log_file)) as lf:
+                        log_tail = lf.read()[-2000:]  # check last 2KB
+                    if "context window" in log_tail.lower() or "context_length_exceeded" in log_tail.lower():
+                        poc_status = "CONTEXT_OVERFLOW"
+                        break
+                except OSError:
                     pass
 
     # Timing
@@ -265,13 +286,15 @@ def compute_stats(summaries: list[dict]) -> dict:
     failed = sum(1 for t in summaries if t["status"] == "FAILED")
     no_submit = sum(1 for t in summaries if t["status"] == "NO_SUBMIT")
     error = sum(1 for t in summaries if t["status"] == "ERROR")
+    timeout = sum(1 for t in summaries if t["status"] == "TIMEOUT")
+    ctx_overflow = sum(1 for t in summaries if t["status"] == "CONTEXT_OVERFLOW")
     costs = [t["cost"] for t in summaries]
     steps_list = [t["num_steps"] for t in summaries]
     durations = [t["duration_s"] for t in summaries if t["duration_s"] > 0]
 
     return dict(
         total=total,
-        passed=passed, failed=failed, no_submit=no_submit, error=error,
+        passed=passed, failed=failed, no_submit=no_submit, error=error, timeout=timeout, context_overflow=ctx_overflow,
         pass_rate=round(passed / total * 100, 1) if total else 0,
         pass_rate_submitted=round(passed / (passed + failed) * 100, 1) if (passed + failed) else 0,
         total_cost=round(sum(costs), 2),
@@ -294,6 +317,8 @@ def compute_stats(summaries: list[dict]) -> dict:
                 passed=sum(1 for t in summaries if t["source"] == src and t["status"] == "PASSED"),
                 failed=sum(1 for t in summaries if t["source"] == src and t["status"] == "FAILED"),
                 no_submit=sum(1 for t in summaries if t["source"] == src and t["status"] == "NO_SUBMIT"),
+                timeout=sum(1 for t in summaries if t["source"] == src and t["status"] == "TIMEOUT"),
+                context_overflow=sum(1 for t in summaries if t["source"] == src and t["status"] == "CONTEXT_OVERFLOW"),
             )
             for src in ("arvo", "oss-fuzz")
         },
@@ -374,6 +399,8 @@ a{color:var(--ac);text-decoration:none}a:hover{text-decoration:underline}
 .bd.no-submit{background:rgba(210,153,34,.15);color:var(--yl)}
 .bd.error{background:rgba(219,109,40,.15);color:var(--og)}
 .bd.in-progress{background:rgba(88,166,255,.15);color:var(--ac)}
+.bd.timeout{background:rgba(240,136,62,.15);color:var(--og)}
+.bd.context-overflow{background:rgba(188,140,255,.15);color:var(--pp)}
 
 /* detail */
 .dp{display:none}.dp.on{display:block}
@@ -450,7 +477,7 @@ svg.sp .ar{fill:rgba(88,166,255,.1)}
     <div id="task-list-panel">
       <div class="tc">
         <input type="text" id="search-input" placeholder="Search tasks..." oninput="filterTasks()">
-        <select id="status-filter" onchange="filterTasks()"><option value="">All Statuses</option><option value="PASSED">Passed</option><option value="FAILED">Failed</option><option value="NO_SUBMIT">No Submit</option><option value="ERROR">Error</option></select>
+        <select id="status-filter" onchange="filterTasks()"><option value="">All Statuses</option><option value="PASSED">Passed</option><option value="FAILED">Failed</option><option value="NO_SUBMIT">No Submit</option><option value="ERROR">Error</option><option value="TIMEOUT">Timeout</option><option value="CONTEXT_OVERFLOW">Context Overflow</option></select>
         <select id="source-filter" onchange="filterTasks()"><option value="">All Sources</option><option value="arvo">Arvo</option><option value="oss-fuzz">OSS-Fuzz</option></select>
         <select id="sort-select" onchange="sortAndRender()"><option value="name-asc">Name ↑</option><option value="name-desc">Name ↓</option><option value="cost-desc">Cost ↓</option><option value="cost-asc">Cost ↑</option><option value="steps-desc">Steps ↓</option><option value="steps-asc">Steps ↑</option><option value="duration-desc">Duration ↓</option><option value="submits-desc">Submits ↓</option></select>
       </div>
@@ -471,7 +498,7 @@ svg.sp .ar{fill:rgba(88,166,255,.1)}
 </div>
 
 <script>
-const SC={PASSED:'#3fb950',FAILED:'#f85149',NO_SUBMIT:'#d29922',ERROR:'#db6d28','IN_PROGRESS':'#58a6ff'};
+const SC={PASSED:'#3fb950',FAILED:'#f85149',NO_SUBMIT:'#d29922',ERROR:'#db6d28','IN_PROGRESS':'#58a6ff',TIMEOUT:'#f0883e','CONTEXT_OVERFLOW':'#bc8cff'};
 let TASKS=[],STATS={},stepCache={},curFolder=null;
 
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
@@ -512,7 +539,7 @@ function renderDashboard(){
   <div class="sg">
     <div class="sc"><div class="lb">Total Tasks</div><div class="vl" style="color:var(--ac)">${S.total}</div><div class="sb">${S.source_counts.arvo} arvo, ${S.source_counts['oss-fuzz']} oss-fuzz</div></div>
     <div class="sc"><div class="lb">Passed</div><div class="vl" style="color:var(--gn)">${S.passed}</div><div class="sb">${S.pass_rate}% overall · ${S.pass_rate_submitted}% of submitted</div></div>
-    <div class="sc"><div class="lb">Failed / No Submit</div><div class="vl" style="color:var(--rd)">${S.failed} <span style="color:var(--yl)">/ ${S.no_submit}</span></div><div class="sb">${S.error} errors</div></div>
+    <div class="sc"><div class="lb">Failed / No Submit</div><div class="vl" style="color:var(--rd)">${S.failed} <span style="color:var(--yl)">/ ${S.no_submit}</span></div><div class="sb">${S.error} errors · ${S.timeout||0} timeouts · ${S.context_overflow||0} ctx overflow</div></div>
     <div class="sc"><div class="lb">Total Cost</div><div class="vl">$${S.total_cost}</div><div class="sb">avg $${S.avg_cost} · range $${S.min_cost}–$${S.max_cost}</div></div>
     <div class="sc"><div class="lb">Avg Steps</div><div class="vl">${S.avg_steps}</div><div class="sb">range ${S.min_steps}–${S.max_steps}</div></div>
     <div class="sc"><div class="lb">Avg Duration</div><div class="vl">${Math.round(S.avg_duration/60)}m</div><div class="sb">${Math.round(S.avg_duration)}s avg</div></div>
@@ -538,7 +565,7 @@ function renderDashboard(){
 
 function drawDonut(){
   const c=document.getElementById('donut'),ctx=c.getContext('2d'),S=STATS;
-  const data=[{l:'Passed',v:S.passed,c:'#3fb950'},{l:'Failed',v:S.failed,c:'#f85149'},{l:'No Submit',v:S.no_submit,c:'#d29922'},{l:'Error',v:S.error,c:'#db6d28'}].filter(d=>d.v>0);
+  const data=[{l:'Passed',v:S.passed,c:'#3fb950'},{l:'Failed',v:S.failed,c:'#f85149'},{l:'No Submit',v:S.no_submit,c:'#d29922'},{l:'Timeout',v:S.timeout||0,c:'#f0883e'},{l:'Ctx Overflow',v:S.context_overflow||0,c:'#bc8cff'},{l:'Error',v:S.error,c:'#db6d28'}].filter(d=>d.v>0);
   const cx=85,cy=85,R=78,r=48,tot=data.reduce((s,d)=>s+d.v,0);
   let a=-Math.PI/2;ctx.clearRect(0,0,170,170);
   data.forEach(d=>{const sl=(d.v/tot)*Math.PI*2;ctx.beginPath();ctx.arc(cx,cy,R,a,a+sl);ctx.arc(cx,cy,r,a+sl,a,true);ctx.closePath();ctx.fillStyle=d.c;ctx.fill();a+=sl});
@@ -550,12 +577,14 @@ function drawDonut(){
 function renderSrcChart(){
   const el=document.getElementById('src-chart'),S=STATS;let h='';
   ['arvo','oss-fuzz'].forEach(src=>{
-    const d=S.status_by_source[src],tot=d.passed+d.failed+d.no_submit;if(!tot)return;
+    const d=S.status_by_source[src],tot=d.passed+d.failed+d.no_submit+(d.timeout||0)+(d.context_overflow||0);if(!tot)return;
     h+=`<div style="margin-bottom:10px"><div style="font-size:12px;font-weight:600;margin-bottom:3px">${src} (${tot})</div><div class="hs">`;
     if(d.passed)h+=`<div class="sg2" style="flex:${d.passed};background:#3fb950">${d.passed}</div>`;
     if(d.failed)h+=`<div class="sg2" style="flex:${d.failed};background:#f85149">${d.failed}</div>`;
     if(d.no_submit)h+=`<div class="sg2" style="flex:${d.no_submit};background:#d29922">${d.no_submit}</div>`;
-    h+=`</div><div style="display:flex;gap:10px;font-size:10px;color:var(--tx3)"><span style="color:#3fb950">● ${d.passed} passed</span><span style="color:#f85149">● ${d.failed} failed</span><span style="color:#d29922">● ${d.no_submit} no submit</span></div></div>`;
+    if(d.timeout)h+=`<div class="sg2" style="flex:${d.timeout};background:#f0883e">${d.timeout}</div>`;
+    if(d.context_overflow)h+=`<div class="sg2" style="flex:${d.context_overflow};background:#bc8cff">${d.context_overflow}</div>`;
+    h+=`</div><div style="display:flex;gap:10px;font-size:10px;color:var(--tx3)"><span style="color:#3fb950">● ${d.passed} passed</span><span style="color:#f85149">● ${d.failed} failed</span><span style="color:#d29922">● ${d.no_submit} no submit</span>${d.timeout?`<span style="color:#f0883e">● ${d.timeout} timeout</span>`:''}${d.context_overflow?`<span style="color:#bc8cff">● ${d.context_overflow} ctx overflow</span>`:''}</div></div>`;
   });el.innerHTML=h;
 }
 
