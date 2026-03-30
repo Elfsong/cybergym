@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """CyberGym Trajectory Viewer — serves an interactive visualization of eval runs."""
 
+# Quickstart usage:
+# uv run python3 trajectory_viewer.py --logs_dir eval_gemini_3_flash_preview/logs       
+# uv run python3 trajectory_viewer.py --logs_dir eval_qwen3_5_35b_a3b/logs
+
 import argparse
 import json
 import os
@@ -178,34 +182,54 @@ def extract_steps(logs_dir: str, folder: str) -> list[dict]:
 
         # Run actions / observations
         if action == "run" and is_action:
-            step["command"] = (entry_args.get("command", "") or "")[:2000]
+            step["command"] = entry_args.get("command", "") or ""
         elif action == "run" and is_obs:
-            step["command"] = (extras.get("command", "") or "")[:2000]
+            step["command"] = extras.get("command", "") or ""
             meta = extras.get("metadata") or {}
             step["exit_code"] = meta.get("exit_code", extras.get("exit_code"))
-            step["output"] = content[:3000]
+            step["output"] = content
 
         if action == "run_ipython" and is_action:
-            step["command"] = (entry_args.get("code", "") or "")[:2000]
+            step["command"] = entry_args.get("code", "") or ""
         elif action == "run_ipython" and is_obs:
-            step["output"] = content[:3000]
+            step["output"] = content
 
         if action == "read":
             step["path"] = entry_args.get("path", extras.get("path", ""))
             if is_obs:
-                step["output"] = content[:3000]
+                step["output"] = content
 
         if action == "edit":
             step["path"] = entry_args.get("path", "")
             step["edit_cmd"] = entry_args.get("command", "")
             if entry_args.get("file_text"):
-                step["output"] = entry_args["file_text"][:3000]
+                step["output"] = entry_args["file_text"]
 
         if action in ("finish", "condensation", "error"):
-            step["msg"] = msg[:3000]
+            step["msg"] = msg
+
+        if action == "message":
+            full = entry_args.get("content", "") or content or msg
+            if full:
+                step["msg_full"] = str(full)
+
+        if action == "recall":
+            if is_action:
+                full = entry_args.get("query", "") or msg
+                step["msg_full"] = str(full)
+            elif is_obs:
+                parts = []
+                for key in ("repo_instructions", "additional_agent_instructions", "microagent_knowledge"):
+                    val = str(extras.get(key, "") or "")
+                    if val and val not in ("", "[]"):
+                        parts.append(f"[{key}]\n{val}")
+                if parts:
+                    step["msg_full"] = "\n\n".join(parts)
+                else:
+                    step["msg_full"] = str(content or msg)
 
         if action == "browse" and is_obs:
-            step["output"] = content[:3000]
+            step["output"] = content
 
         # LLM thinking
         tcm = entry.get("tool_call_metadata") or {}
@@ -214,7 +238,7 @@ def extract_steps(logs_dir: str, folder: str) -> list[dict]:
         if choices:
             thinking = (choices[0].get("message") or {}).get("content", "")
             if thinking:
-                step["thinking"] = thinking[:800]
+                step["thinking"] = thinking
 
         # Submit detection
         cmd_str = entry_args.get("command", "") or ""
@@ -416,6 +440,7 @@ svg.sp .ar{fill:rgba(88,166,255,.1)}
   <div class="nav">
     <button class="on" onclick="showView('dashboard',this)">Dashboard</button>
     <button onclick="showView('tasks',this)">Tasks</button>
+    <button id="refresh-btn" onclick="doRefresh()" title="Rescan logs directory">&#8635;</button>
   </div>
 </div>
 
@@ -466,10 +491,18 @@ function showView(v,btn){
 // ---- Init ----
 async function init(){
   const [tasks,stats]=await Promise.all([api('/api/tasks'),api('/api/stats')]);
-  TASKS=tasks;STATS=stats;
+  TASKS=tasks;STATS=stats;stepCache={};
   document.getElementById('model-badge').textContent=TASKS.length?TASKS[0].model:'';
   renderDashboard();
   filterTasks();
+}
+
+async function doRefresh(){
+  const btn=document.getElementById('refresh-btn');
+  btn.disabled=true;btn.style.opacity='.5';
+  try{await api('/api/refresh');await init()}
+  catch(e){btn.textContent='\u2717';setTimeout(()=>btn.textContent='\u21BB',2000)}
+  finally{btn.style.opacity='1';btn.disabled=false}
 }
 
 // ---- Dashboard ----
@@ -644,7 +677,8 @@ function renderSteps(steps,filter){
     if(s.path){bd+=`<div class="lbl">Path</div><pre>${esc(s.path)}</pre>`}
     if(s.output){bd+=`<div class="lbl">Output</div><pre>${esc(s.output)}</pre>`}
     if(s.exit_code!==undefined&&s.exit_code!==null)bd+=`<div class="lbl">Exit Code: ${s.exit_code}</div>`;
-    if(s.type==='finish'||s.type==='condensation'||s.type==='error')bd+=`<div class="lbl">Message</div><pre>${esc(s.msg)}</pre>`;
+    if(s.msg_full)bd+=`<div class="lbl">Message</div><pre>${esc(s.msg_full)}</pre>`;
+    else if(s.type==='finish'||s.type==='condensation'||s.type==='error')bd+=`<div class="lbl">Message</div><pre>${esc(s.msg)}</pre>`;
     h+=`<div class="st ${ec}" onclick="this.classList.toggle('ex')"><div class="sh"><span class="si">${s.id}</span><span class="stp ${s.type}">${s.type}</span><span class="ss">${s.src}</span><span class="sm">${esc((s.msg||'').split('\\n')[0])}</span>${sb}<span class="scs">${cs}</span></div>${bd?`<div class="sb2">${bd}</div>`:''}</div>`;
   });el.innerHTML=h;
 }
@@ -693,6 +727,18 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._send_json(self.__class__._stats)
         elif path == "/api/tasks":
             self._send_json(self.__class__._summaries)
+        elif path == "/api/refresh":
+            logs_dir = self.__class__.logs_dir
+            folders = sorted(
+                d for d in os.listdir(logs_dir)
+                if os.path.isdir(os.path.join(logs_dir, d))
+            )
+            summaries = [extract_task_summary(logs_dir, f) for f in folders]
+            stats = compute_stats(summaries)
+            self.__class__._summaries = summaries
+            self.__class__._stats = stats
+            print(f"  Refreshed: {len(summaries)} tasks, {stats['passed']} passed")
+            self._send_json({"ok": True, "total": len(summaries)})
         elif path.startswith("/api/steps/"):
             folder = path[len("/api/steps/"):]
             # Validate folder exists
