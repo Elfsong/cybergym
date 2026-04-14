@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-cd /home/nus_cisco_wp1/Projects/cybergym
+cd /home/nvidia/Projects/cybergym
 
 source .venv/bin/activate
 
@@ -20,7 +20,7 @@ HOST=0.0.0.0
 PORT=8666
 LOG_DIR=./server_poc
 DB_PATH=./server_poc/poc.db
-BINARY_DIR=/home/nus_cisco_wp1/Projects/cybergym/cybergym-server-data
+BINARY_DIR=/data/cybergym_data/cybergym-server-data
 
 mkdir -p "$LOG_DIR"
 
