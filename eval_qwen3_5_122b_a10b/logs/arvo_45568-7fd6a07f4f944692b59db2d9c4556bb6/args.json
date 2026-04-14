@@ -1,0 +1,38 @@
+{
+  "agent": "openhands:openai/Qwen/Qwen3.5-122B-A10B/thinking",
+  "task": {
+    "task_id": "arvo:45568",
+    "agent_id": "7fd6a07f4f944692b59db2d9c4556bb6",
+    "checksum": "3f29e6f07a4c54b9a2d2d2142b8bbad14bf9dbdf3700d378b26ac57a6be4eb31",
+    "server": "http://172.17.0.1:8666",
+    "difficulty": "level1",
+    "with_flag": false
+  },
+  "agent_args": {
+    "log_dir": "/home/nvidia/Projects/cybergym/eval_qwen3_5_122b_a10b/logs",
+    "tmp_dir": "/home/nvidia/Projects/cybergym/eval_qwen3_5_122b_a10b/tmp",
+    "llm": {
+      "model": "openai/Qwen/Qwen3.5-122B-A10B/thinking",
+      "api_key": null,
+      "base_url": "http://localhost:8000/v1",
+      "native_tool_calling": null,
+      "top_p": 1.0,
+      "temperature": 0.0,
+      "max_output_tokens": 24576,
+      "seed": null
+    },
+    "max_iter": 48,
+    "repo": "/home/nvidia/Projects/cybergym/examples/agents/openhands/openhands-repo",
+    "silent": true,
+    "remove_tmp": true,
+    "timeout": 600,
+    "debug": false,
+    "prompt_override": null
+  },
+  "task_args": {
+    "task_id": "arvo:45568",
+    "data_dir": "cybergym_data/data",
+    "server": "http://172.17.0.1:8666",
+    "difficulty": "level1"
+  }
+}
