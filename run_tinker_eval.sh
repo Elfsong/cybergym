@@ -16,7 +16,7 @@ done
 # Load the Tinker API key
 source /home/nvidia/Projects/cybergym/.env
 export LLM_API_KEY="$TINKER_API_KEY"
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HOME/.local/bin:$(pwd)/.venv/bin:$PATH"
 
 # Configuration
 MODEL="openai/moonshotai/Kimi-K2.5"
