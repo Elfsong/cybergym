@@ -260,20 +260,29 @@ def parse_trajectory(traj_path: Path) -> dict:
     }
 
 
-def _check_process_alive(task_id: str) -> bool:
-    """Check if the agent process for this task is still running."""
+def _get_alive_task_ids() -> set[str]:
+    """Get all task_ids with a running agent process (single pgrep call)."""
     import subprocess as _sp
     try:
         result = _sp.run(
-            ["pgrep", "-f", "--", f"task_id {task_id}"],
-            capture_output=True, timeout=2,
+            ["pgrep", "-a", "-f", "task_id "],
+            capture_output=True, text=True, timeout=5,
         )
-        return result.returncode == 0
+        alive = set()
+        for line in result.stdout.splitlines():
+            # line: "12345 python3 ... --task_id arvo:8933 ..."
+            idx = line.find("task_id ")
+            if idx >= 0:
+                rest = line[idx + 8:]
+                tid = rest.split()[0] if rest else ""
+                if tid:
+                    alive.add(tid)
+        return alive
     except Exception:
-        return False
+        return set()
 
 
-def _reconcile_status(info: dict, task_id: str) -> str:
+def _reconcile_status(info: dict, task_id: str, alive_ids: set[str]) -> str:
     """Reconcile raw parser status with process liveness and finish action.
 
     Parser raw status (from submit.sh exit_code):
@@ -301,7 +310,7 @@ def _reconcile_status(info: dict, task_id: str) -> str:
         return "PASSED"
 
     has_finish = info.get("has_finish", False)
-    process_alive = _check_process_alive(task_id)
+    process_alive = task_id in alive_ids
 
     if status == "FAILED":
         if has_finish or not process_alive:
@@ -319,25 +328,68 @@ def _reconcile_status(info: dict, task_id: str) -> str:
 def _classify_termination(info: dict) -> str:
     """Classify why a task terminated without submit or finish."""
     end_reason = info.get("end_reason", "")
-    if "maximum iteration" in end_reason:
+    # Only check the first line to avoid false matches from stack traces
+    first_line = end_reason.split("\n", 1)[0].lower()
+    if "maximum iteration" in first_line:
         return "MAX_ITER"
-    if "timeout" in end_reason.lower() or "timed out" in end_reason.lower():
+    if "timeout" in first_line or "timed out" in first_line:
         return "TIMEOUT"
     return "INTERRUPTED"
 
 
 def scan_log_dir(log_dir: Path, task_list: list[str], max_iter: int) -> list[TaskState]:
     """Scan the log directory and build task states."""
-    # Build map: task_id_normalized -> newest dir (by mtime)
+    alive_ids = _get_alive_task_ids()
+
+    # Build map: task_id_normalized -> best dir
+    # Prefer PASSED runs; among same-status runs, pick the newest.
+
+    def _quick_has_passed(d: Path) -> bool:
+        """Fast check for PASSED status using only the trajectory file."""
+        traj = d / "trajectory"
+        if not traj.exists():
+            return False
+        try:
+            with open(traj) as f:
+                data = json.load(f)
+        except Exception:
+            return False
+        for i, item in enumerate(data):
+            cmd = str(item.get("args", {}).get("command", ""))
+            if "submit.sh" in cmd and "cat" not in cmd and i + 1 < len(data):
+                content = str(data[i + 1].get("content", ""))
+                try:
+                    js = content.find("{")
+                    je = content.find("}", js) if js >= 0 else -1
+                    if js >= 0 and je >= 0:
+                        ec = json.loads(content[js : je + 1]).get("exit_code")
+                        if ec is not None and ec != 0:
+                            return True
+                except Exception:
+                    pass
+        return False
+
     existing_dirs: dict[str, Path] = {}
+    passed_cache: dict[Path, bool] = {}
     if log_dir.exists():
         for d in log_dir.iterdir():
             if d.is_dir():
                 # dir name format: arvo_8933-<uuid>
                 task_norm = d.name.rsplit("-", 1)[0] if "-" in d.name else d.name
                 prev = existing_dirs.get(task_norm)
-                if prev is None or d.stat().st_mtime > prev.stat().st_mtime:
+                if prev is None:
                     existing_dirs[task_norm] = d
+                else:
+                    # Prefer PASSED; otherwise newest
+                    if d not in passed_cache:
+                        passed_cache[d] = _quick_has_passed(d)
+                    if prev not in passed_cache:
+                        passed_cache[prev] = _quick_has_passed(prev)
+                    if passed_cache[d] and not passed_cache[prev]:
+                        existing_dirs[task_norm] = d
+                    elif not passed_cache[prev] and not passed_cache[d]:
+                        if d.stat().st_mtime > prev.stat().st_mtime:
+                            existing_dirs[task_norm] = d
 
     states = []
     for task_id in task_list:
@@ -384,7 +436,7 @@ def scan_log_dir(log_dir: Path, task_list: list[str], max_iter: int) -> list[Tas
             continue
 
         state.step = info["steps"]
-        state.status = _reconcile_status(info, task_id)
+        state.status = _reconcile_status(info, task_id, alive_ids)
         state.cost = info["cost"]
         state.prompt_tokens = info["prompt_tokens"]
         state.completion_tokens = info["completion_tokens"]
