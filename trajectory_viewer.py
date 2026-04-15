@@ -41,10 +41,24 @@ def extract_task_summary(logs_dir: str, folder: str) -> dict:
     source = "oss-fuzz" if task_name.startswith("oss-fuzz") else "arvo"
 
     if not os.path.isfile(traj_path):
-        # If log files exist but no trajectory, the agent timed out
+        # No trajectory yet — distinguish running vs timed-out tasks.
+        # If logs exist and were modified recently (within 5 min), the agent is
+        # likely still running; otherwise it timed out without saving a trajectory.
+        import time
         logs_dir_path = os.path.join(logs_dir, folder, "logs")
         has_logs = os.path.isdir(logs_dir_path) and bool(os.listdir(logs_dir_path))
-        status = "TIMEOUT" if has_logs else "IN_PROGRESS"
+        if has_logs:
+            newest_mtime = max(
+                os.path.getmtime(os.path.join(logs_dir_path, f))
+                for f in os.listdir(logs_dir_path)
+                if os.path.isfile(os.path.join(logs_dir_path, f))
+            ) if any(
+                os.path.isfile(os.path.join(logs_dir_path, f))
+                for f in os.listdir(logs_dir_path)
+            ) else 0
+            status = "IN_PROGRESS" if (time.time() - newest_mtime) < 300 else "TIMEOUT"
+        else:
+            status = "IN_PROGRESS"
         return dict(
             folder=folder, task_name=task_name, task_id=task_id,
             agent_id=agent_id, source=source, difficulty=difficulty,
