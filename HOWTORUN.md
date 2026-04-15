@@ -70,8 +70,11 @@ Keybindings in the TUI:
 
 | Key | Action |
 |-----|--------|
-| `q` | Quit |
-| `r` | Refresh |
+| `Enter` | View trajectory (detailed interaction log) |
+| `q` | Quit / Back (in trajectory view) |
+| `Escape` | Back (in trajectory view) |
+| `r` | Refresh / Reload |
+| `g` / `G` | Scroll to top / bottom (in trajectory view) |
 | `p` | Sort by passed first |
 | `s` | Sort by steps |
 | `c` | Sort by cost |
