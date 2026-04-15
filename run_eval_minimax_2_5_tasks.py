@@ -5,12 +5,71 @@ import argparse
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
+
+import docker
+import docker.errors
+
+
+# MiniMax pricing ($ per million tokens)
+PRICING = {
+    "MiniMax-M2.7": {
+        "input": 0.3, "output": 1.2, "cache_read": 0.06, "cache_write": 0.375,
+    },
+    "MiniMax-M2.7-highspeed": {
+        "input": 0.6, "output": 2.4, "cache_read": 0.06, "cache_write": 0.375,
+    },
+    "MiniMax-M2.5": {
+        "input": 0.3, "output": 1.2, "cache_read": 0.03, "cache_write": 0.375,
+    },
+    "MiniMax-M2.5-highspeed": {
+        "input": 0.6, "output": 2.4, "cache_read": 0.03, "cache_write": 0.375,
+    },
+}
+
+
+def compute_cost(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cache_read_tokens: int,
+    cache_write_tokens: int,
+) -> float:
+    """Compute cost in USD from token counts and model pricing."""
+    # Match model name from the pricing table (e.g. "openai/MiniMaxAI/MiniMax-M2.5" -> "MiniMax-M2.5")
+    prices = None
+    for key, p in PRICING.items():
+        if key in model:
+            prices = p
+            break
+    if prices is None:
+        return 0.0
+    return (
+        prompt_tokens * prices["input"]
+        + completion_tokens * prices["output"]
+        + cache_read_tokens * prices["cache_read"]
+        + cache_write_tokens * prices["cache_write"]
+    ) / 1_000_000
+
+
+class _Tee:
+    """Write to two streams simultaneously."""
+    def __init__(self, *streams):
+        self._streams = streams
+    def write(self, data):
+        for s in self._streams:
+            s.write(data)
+            s.flush()
+    def flush(self):
+        for s in self._streams:
+            s.flush()
 
 
 def parse_tasks_file(path: str) -> list[str]:
@@ -24,7 +83,7 @@ def parse_tasks_file(path: str) -> list[str]:
     return tasks
 
 
-def summarize_task(task_id: str, wall_time: int, log_dir: str) -> tuple:
+def summarize_task(task_id: str, wall_time: int, log_dir: str, model: str) -> tuple:
     """Parse trajectory to extract status, cost, and token usage."""
     task_norm = task_id.replace(":", "_")
     wt_str = f"{wall_time // 60}m{wall_time % 60:02d}s"
@@ -32,7 +91,7 @@ def summarize_task(task_id: str, wall_time: int, log_dir: str) -> tuple:
     candidates = glob.glob(os.path.join(log_dir, task_norm + "-*", "trajectory"))
     if not candidates:
         print(f"  {task_norm:<25} time: {wt_str:>7}  steps:    ?  NO_TRAJECTORY", flush=True)
-        return "OTHER", 0.0, 0, 0, 0
+        return "OTHER", 0.0, 0, 0, 0, 0
 
     traj_path = max(candidates, key=os.path.getmtime)
     try:
@@ -40,7 +99,7 @@ def summarize_task(task_id: str, wall_time: int, log_dir: str) -> tuple:
             data = json.load(f)
     except Exception:
         print(f"  {task_norm:<25} time: {wt_str:>7}  steps:    ?  !  ERROR", flush=True)
-        return "OTHER", 0.0, 0, 0, 0
+        return "OTHER", 0.0, 0, 0, 0, 0
 
     steps = len([e for e in data if e.get("action") and e.get("source") == "agent"])
 
@@ -72,26 +131,42 @@ def summarize_task(task_id: str, wall_time: int, log_dir: str) -> tuple:
     markers = {"PASSED": "\u2713", "FAILED": "\u2717", "NO_SUBMIT": "\u2014"}
     marker = markers.get(poc_status, "?")
 
-    cost = 0.0
-    prompt_tokens = completion_tokens = cache_read_tokens = 0
-    for e in reversed(data):
+    # Patch accumulated_cost in every llm_metrics entry and write back
+    dirty = False
+    prompt_tokens = completion_tokens = cache_read_tokens = cache_write_tokens = 0
+    for e in data:
         m = e.get("llm_metrics")
-        if m and "accumulated_cost" in m:
-            cost = m["accumulated_cost"]
-            usage = m.get("accumulated_token_usage", {})
+        if m and "accumulated_token_usage" in m:
+            usage = m["accumulated_token_usage"]
+            new_cost = compute_cost(
+                model,
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+                usage.get("cache_read_tokens", 0),
+                usage.get("cache_write_tokens", 0),
+            )
+            if m.get("accumulated_cost", 0) != new_cost:
+                m["accumulated_cost"] = round(new_cost, 6)
+                dirty = True
+            # Keep the last entry's tokens for the summary
             prompt_tokens = usage.get("prompt_tokens", 0)
             completion_tokens = usage.get("completion_tokens", 0)
             cache_read_tokens = usage.get("cache_read_tokens", 0)
-            break
+            cache_write_tokens = usage.get("cache_write_tokens", 0)
 
+    if dirty:
+        with open(traj_path, "w") as f:
+            json.dump(data, f)
+
+    cost = compute_cost(model, prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens)
     cost_str = f"${cost:.4f}"
     print(
         f"  {task_norm:<25} time: {wt_str:>7}  steps: {steps:>4}  cost: {cost_str:>8}"
         f"  prompt: {prompt_tokens:>8}  compl: {completion_tokens:>7}"
-        f"  cache: {cache_read_tokens:>8}  {marker} {poc_status}",
+        f"  cache_r: {cache_read_tokens:>8}  cache_w: {cache_write_tokens:>8}  {marker} {poc_status}",
         flush=True,
     )
-    return poc_status, cost, prompt_tokens, completion_tokens, cache_read_tokens
+    return poc_status, cost, prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens
 
 
 def run_task(
@@ -111,7 +186,10 @@ def run_task(
     silent: str,
     difficulty: str,
     verbose: bool,
+    stagger: float,
 ) -> tuple[int, str, int]:
+    if stagger > 0:
+        time.sleep(task_num * stagger)
     print(f"[{task_num}/{total}] [{datetime.now():%Y-%m-%d %H:%M:%S}] Starting: {task_id}", flush=True)
     start = time.monotonic()
     cmd = [
@@ -130,13 +208,79 @@ def run_task(
         "--silent", silent,
         "--difficulty", difficulty,
     ]
+    task_norm = task_id.replace(":", "_")
     stderr = None if verbose else subprocess.DEVNULL
     try:
         subprocess.run(cmd, stderr=stderr, timeout=int(timeout) + 300)
     except Exception as e:
         print(f"  [{task_num}/{total}] {task_id}: process error: {e}", flush=True)
+        _cleanup_orphaned_container(task_norm, log_dir)
+    _recover_trajectory(task_norm, log_dir)
     elapsed = int(time.monotonic() - start)
     return task_num, task_id, elapsed
+
+
+def _cleanup_orphaned_container(task_norm: str, log_dir: str):
+    """Clean up Docker container left behind when the outer subprocess was killed."""
+    pat = re.compile(
+        r"runtime ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]{16})"
+    )
+    candidates = glob.glob(os.path.join(log_dir, task_norm + "-*", "logs", "*.log"))
+    if not candidates:
+        return
+    log_path = max(candidates, key=os.path.getmtime)
+    container_id = None
+    try:
+        with open(log_path) as f:
+            for line in f:
+                match = pat.search(line)
+                if match:
+                    container_id = match.group(1)
+                    break
+    except Exception:
+        return
+    if not container_id:
+        return
+    try:
+        client = docker.from_env()
+        container = client.containers.get(f"openhands-runtime-{container_id}")
+        container.remove(force=True)
+        print(f"  Cleaned up orphaned container: {container_id}", flush=True)
+    except docker.errors.NotFound:
+        pass
+    except Exception as e:
+        print(f"  Failed to cleanup container {container_id}: {e}", flush=True)
+
+
+def _recover_trajectory(task_norm: str, log_dir: str):
+    """Rebuild trajectory from event files when openhands was killed before writing it."""
+    candidates = glob.glob(os.path.join(log_dir, task_norm + "-*"))
+    if not candidates:
+        return
+    task_dir = max(candidates, key=os.path.getmtime)
+    traj_path = os.path.join(task_dir, "trajectory")
+    if os.path.exists(traj_path):
+        return
+    session_dirs = glob.glob(os.path.join(task_dir, "file", "sessions", "*", "events"))
+    if not session_dirs:
+        return
+    best_dir = max(session_dirs, key=lambda d: len(os.listdir(d)))
+    event_files = glob.glob(os.path.join(best_dir, "*.json"))
+    if not event_files:
+        return
+    event_files.sort(key=lambda p: int(os.path.basename(p).replace(".json", "")))
+    trajectory = []
+    for ef in event_files:
+        try:
+            with open(ef) as f:
+                trajectory.append(json.load(f))
+        except (json.JSONDecodeError, OSError):
+            continue
+    if trajectory:
+        with open(traj_path, "w") as f:
+            json.dump(trajectory, f)
+        steps = len([e for e in trajectory if e.get("action") and e.get("source") == "agent"])
+        print(f"  Recovered trajectory: {len(trajectory)} events, {steps} steps", flush=True)
 
 
 def main():
@@ -148,13 +292,18 @@ def main():
     parser.add_argument("--server-ip", default="172.17.0.1")
     parser.add_argument("--server-port", default="8666")
     parser.add_argument("--difficulty", default="level1")
-    parser.add_argument("--timeout", default="1800")
+    parser.add_argument("--timeout", default="2400")
     parser.add_argument("--max-iter", default="72")
     parser.add_argument("--max-output-tokens", default="8192")
     parser.add_argument("--parallel", type=int, default=36)
     parser.add_argument("--tasks-file", default=None, help="Path to TASKS file (default: TASKS in script dir)")
+    parser.add_argument("--stagger", type=float, default=1.0, help="Seconds between task launches to avoid Docker startup storm (0 to disable)")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
+
+    # Append run UUID to out-dir so each run is isolated
+    run_id = uuid4().hex[:8]
+    args.out_dir = f"{args.out_dir}_{run_id}"
 
     # Environment
     os.environ.setdefault("LLM_API_KEY", "EMPTY")
@@ -177,8 +326,15 @@ def main():
     silent = "false" if args.verbose else "true"
     server = f"http://{args.server_ip}:{args.server_port}"
 
+    # Tee stdout/stderr to a log file inside out-dir
+    run_log_path = os.path.join(args.out_dir, "run.log")
+    run_log = open(run_log_path, "w")
+    sys.stdout = _Tee(sys.stdout, run_log)
+    sys.stderr = _Tee(sys.stderr, run_log)
+
     print(f"Running {total} tasks (parallel: {args.parallel}, mode: {'verbose' if args.verbose else 'concise'})")
     print(f"Model: {args.model} via vLLM ({args.base_url})")
+    print(f"Output: {args.out_dir}")
     print("===========================================================")
 
     # Run all tasks with bounded parallelism
@@ -199,12 +355,13 @@ def main():
                 silent=silent,
                 difficulty=args.difficulty,
                 verbose=args.verbose,
+                stagger=args.stagger,
             ): tid
             for i, tid in enumerate(tasks)
         }
         for fut in as_completed(futures):
             task_num, task_id, elapsed = fut.result()
-            result = summarize_task(task_id, elapsed, log_dir)
+            result = summarize_task(task_id, elapsed, log_dir, args.model)
             results.append(result)
 
     # Tally results
@@ -213,18 +370,21 @@ def main():
     total_cost = sum(r[1] for r in results)
     total_prompt = sum(r[2] for r in results)
     total_compl = sum(r[3] for r in results)
-    total_cache = sum(r[4] for r in results)
+    total_cache_read = sum(r[4] for r in results)
+    total_cache_write = sum(r[5] for r in results)
     total_tokens = total_prompt + total_compl
     other_count = len(results) - pass_count - fail_count
 
     print("===========================================================")
     print(f"All {total} tasks completed. Passed: {pass_count}  Failed: {fail_count}  Other: {other_count}")
     print("-----------------------------------------------------------")
-    print(f"Total cost:              ${total_cost:.4f}")
-    print(f"Total prompt tokens:     {total_prompt}")
-    print(f"Total completion tokens: {total_compl}")
-    print(f"Total cache read tokens: {total_cache}")
-    print(f"Total tokens:            {total_tokens}")
+    print(f"Total cost:               ${total_cost:.4f}")
+    print(f"Total prompt tokens:      {total_prompt:,}")
+    print(f"Total completion tokens:  {total_compl:,}")
+    print(f"Total cache read tokens:  {total_cache_read:,}")
+    print(f"Total cache write tokens: {total_cache_write:,}")
+    print(f"Total tokens:             {total_tokens:,}")
+    print(f"Avg cost per task:        ${total_cost / max(len(results), 1):.4f}")
     print("-----------------------------------------------------------")
     print(f"Results in {log_dir}/")
 

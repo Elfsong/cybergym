@@ -512,7 +512,7 @@ svg.sp .ar{fill:rgba(88,166,255,.1)}
 </div>
 
 <script>
-const SC={PASSED:'#3fb950',FAILED:'#f85149',NO_SUBMIT:'#d29922',ERROR:'#db6d28','IN_PROGRESS':'#58a6ff',TIMEOUT:'#f0883e','CONTEXT_OVERFLOW':'#bc8cff'};
+const SC={PASSED:'#3fb950',FAILED:'#f85149',NO_SUBMIT:'#8b949e',ERROR:'#db6d28','IN_PROGRESS':'#58a6ff',TIMEOUT:'#d29922','CONTEXT_OVERFLOW':'#bc8cff'};
 let TASKS=[],STATS={},stepCache={},curFolder=null;
 
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
@@ -579,7 +579,7 @@ function renderDashboard(){
 
 function drawDonut(){
   const c=document.getElementById('donut'),ctx=c.getContext('2d'),S=STATS;
-  const data=[{l:'Passed',v:S.passed,c:'#3fb950'},{l:'Failed',v:S.failed,c:'#f85149'},{l:'No Submit',v:S.no_submit,c:'#d29922'},{l:'Timeout',v:S.timeout||0,c:'#f0883e'},{l:'Ctx Overflow',v:S.context_overflow||0,c:'#bc8cff'},{l:'Error',v:S.error,c:'#db6d28'}].filter(d=>d.v>0);
+  const data=[{l:'Passed',v:S.passed,c:'#3fb950'},{l:'Failed',v:S.failed,c:'#f85149'},{l:'No Submit',v:S.no_submit,c:'#8b949e'},{l:'Timeout',v:S.timeout||0,c:'#d29922'},{l:'Ctx Overflow',v:S.context_overflow||0,c:'#bc8cff'},{l:'Error',v:S.error,c:'#db6d28'}].filter(d=>d.v>0);
   const cx=85,cy=85,R=78,r=48,tot=data.reduce((s,d)=>s+d.v,0);
   let a=-Math.PI/2;ctx.clearRect(0,0,170,170);
   data.forEach(d=>{const sl=(d.v/tot)*Math.PI*2;ctx.beginPath();ctx.arc(cx,cy,R,a,a+sl);ctx.arc(cx,cy,r,a+sl,a,true);ctx.closePath();ctx.fillStyle=d.c;ctx.fill();a+=sl});
@@ -595,10 +595,10 @@ function renderSrcChart(){
     h+=`<div style="margin-bottom:10px"><div style="font-size:12px;font-weight:600;margin-bottom:3px">${src} (${tot})</div><div class="hs">`;
     if(d.passed)h+=`<div class="sg2" style="flex:${d.passed};background:#3fb950">${d.passed}</div>`;
     if(d.failed)h+=`<div class="sg2" style="flex:${d.failed};background:#f85149">${d.failed}</div>`;
-    if(d.no_submit)h+=`<div class="sg2" style="flex:${d.no_submit};background:#d29922">${d.no_submit}</div>`;
-    if(d.timeout)h+=`<div class="sg2" style="flex:${d.timeout};background:#f0883e">${d.timeout}</div>`;
+    if(d.no_submit)h+=`<div class="sg2" style="flex:${d.no_submit};background:#8b949e">${d.no_submit}</div>`;
+    if(d.timeout)h+=`<div class="sg2" style="flex:${d.timeout};background:#d29922">${d.timeout}</div>`;
     if(d.context_overflow)h+=`<div class="sg2" style="flex:${d.context_overflow};background:#bc8cff">${d.context_overflow}</div>`;
-    h+=`</div><div style="display:flex;gap:10px;font-size:10px;color:var(--tx3)"><span style="color:#3fb950">● ${d.passed} passed</span><span style="color:#f85149">● ${d.failed} failed</span><span style="color:#d29922">● ${d.no_submit} no submit</span>${d.timeout?`<span style="color:#f0883e">● ${d.timeout} timeout</span>`:''}${d.context_overflow?`<span style="color:#bc8cff">● ${d.context_overflow} ctx overflow</span>`:''}</div></div>`;
+    h+=`</div><div style="display:flex;gap:10px;font-size:10px;color:var(--tx3)"><span style="color:#3fb950">● ${d.passed} passed</span><span style="color:#f85149">● ${d.failed} failed</span><span style="color:#8b949e">● ${d.no_submit} no submit</span>${d.timeout?`<span style="color:#d29922">● ${d.timeout} timeout</span>`:''}${d.context_overflow?`<span style="color:#bc8cff">● ${d.context_overflow} ctx overflow</span>`:''}</div></div>`;
   });el.innerHTML=h;
 }
 

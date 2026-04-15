@@ -115,7 +115,7 @@ nohup bash start_vllm_server.sh > vllm_server.log 2>&1 &
 nohup bash start_cybergym_server.sh > cybergym_server.log 2>&1 &
 
 # Wait for servers to be ready, then run eval
-nohup uv run python3 run_eval_tasks.py > /data/cybergym_data/cybergym-eval-data/eval_minimax_m2_5/run.log 2>&1 &
+cd ~/Projects/cybergym && nohup uv run python3 run_eval_tasks.py &>/dev/null &  
 
 # Monitor
 uv run python3 monitor.py

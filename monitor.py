@@ -66,18 +66,66 @@ def _parse_poc_status(data: list[dict]) -> tuple[str, int]:
     return status, submit_count
 
 
-def _extract_llm_metrics(data: list[dict]) -> tuple[float, int, int, int]:
-    """Extract accumulated cost and token usage. Returns (cost, prompt, completion, cache)."""
+# Pricing: $ per million tokens (input, output, cache_read, cache_write)
+_PRICING = {
+    "MiniMax-M2.7":           (0.3,  1.2, 0.06, 0.375),
+    "MiniMax-M2.7-highspeed": (0.6,  2.4, 0.06, 0.375),
+    "MiniMax-M2.5":           (0.3,  1.2, 0.03, 0.375),
+    "MiniMax-M2.5-highspeed": (0.6,  2.4, 0.03, 0.375),
+}
+# Tinker API pricing (input, output) — no cache pricing
+_TINKER_PRICING = {
+    "Qwen/Qwen3-4B-Instruct-2507": (0.07, 0.22),
+    "Qwen/Qwen3-8B": (0.13, 0.40),
+    "Qwen/Qwen3-30B-A3B": (0.12, 0.30),
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": (0.18, 0.44),
+    "Qwen/Qwen3-32B": (0.49, 1.47),
+    "Qwen/Qwen3-235B-Instruct-2507": (0.68, 1.70),
+    "Qwen/Qwen3-VL-235B-A22B-Instruct": (1.02, 2.56),
+    "Qwen/Qwen3.5-397B-A17B": (2.00, 5.00),
+    "Qwen/Qwen3.5-35B-A3B": (0.36, 0.89),
+    "Qwen/Qwen3.5-27B": (1.24, 3.73),
+    "Qwen/Qwen3.5-4B": (0.22, 0.67),
+    "meta-llama/Llama-3.2-1B": (0.03, 0.09),
+    "meta-llama/Llama-3.2-3B": (0.06, 0.18),
+    "meta-llama/Llama-3.1-8B": (0.13, 0.40),
+    "meta-llama/Llama-3.1-70B": (1.05, 3.16),
+    "deepseek-ai/DeepSeek-V3.1": (1.13, 2.81),
+    "gpt-oss/GPT-OSS-120B": (0.18, 0.44),
+    "gpt-oss/GPT-OSS-20B": (0.12, 0.30),
+    "moonshotai/Kimi-K2-Thinking": (0.98, 2.44),
+    "moonshotai/Kimi-K2.5": (1.47, 3.66),
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": (0.13, 0.33),
+}
+
+
+def _compute_cost(model: str, prompt: int, completion: int, cache_read: int) -> float:
+    """Compute cost in USD from token counts and model name."""
+    # Try MiniMax pricing first
+    for key, (inp, out, cr, _cw) in _PRICING.items():
+        if key in model:
+            return (prompt * inp + completion * out + cache_read * cr) / 1_000_000
+    # Try Tinker pricing
+    raw = model.removeprefix("openai/")
+    tp = _TINKER_PRICING.get(raw)
+    if tp:
+        return (prompt * tp[0] + completion * tp[1]) / 1_000_000
+    return 0.0
+
+
+def _extract_llm_metrics(data: list[dict], model: str = "") -> tuple[float, int, int, int]:
+    """Extract token usage and compute cost. Returns (cost, prompt, completion, cache)."""
     for e in reversed(data):
         m = e.get("llm_metrics")
-        if m and "accumulated_cost" in m:
-            u = m.get("accumulated_token_usage", {})
-            return (
-                m["accumulated_cost"],
-                u.get("prompt_tokens", 0),
-                u.get("completion_tokens", 0),
-                u.get("cache_read_tokens", 0),
-            )
+        if m and "accumulated_token_usage" in m:
+            u = m["accumulated_token_usage"]
+            prompt = u.get("prompt_tokens", 0)
+            completion = u.get("completion_tokens", 0)
+            cache_read = u.get("cache_read_tokens", 0)
+            if not model:
+                model = u.get("model", "")
+            cost = _compute_cost(model, prompt, completion, cache_read)
+            return cost, prompt, completion, cache_read
     return 0.0, 0, 0, 0
 
 
@@ -256,7 +304,7 @@ def _classify_termination(info: dict) -> str:
     return "INTERRUPTED"
 
 
-def scan_log_dir(log_dir: Path, task_list: list[str], max_iter: int) -> list[TaskState]:
+def scan_log_dir(log_dir: Path, task_list: list[str]) -> list[TaskState]:
     """Scan the log directory and build task states."""
     alive_ids = _get_alive_task_ids()
 
@@ -300,7 +348,7 @@ def scan_log_dir(log_dir: Path, task_list: list[str], max_iter: int) -> list[Tas
     states = []
     for task_id in task_list:
         task_norm = task_id.replace(":", "_")
-        state = TaskState(task_id=task_id, dir_name=task_norm, max_iter=max_iter)
+        state = TaskState(task_id=task_id, dir_name=task_norm)
 
         if task_norm not in existing_dirs:
             state.status = "PENDING"
@@ -316,7 +364,7 @@ def scan_log_dir(log_dir: Path, task_list: list[str], max_iter: int) -> list[Tas
             try:
                 with open(args_path) as f:
                     args_data = json.load(f)
-                state.max_iter = args_data.get("agent_args", {}).get("max_iter", max_iter)
+                state.max_iter = args_data.get("agent_args", {}).get("max_iter", state.max_iter)
             except Exception:
                 pass
 
@@ -732,11 +780,10 @@ class CyberGymMonitor(App):
     sort_key: reactive[str] = reactive("status")
     sort_reverse: reactive[bool] = reactive(False)
 
-    def __init__(self, log_dir: Path, task_list: list[str], max_iter: int = 64, refresh_interval: float = 3.0):
+    def __init__(self, log_dir: Path, task_list: list[str], refresh_interval: float = 3.0):
         super().__init__()
         self.log_dir = log_dir
         self.task_list = task_list
-        self.max_iter = max_iter
         self.refresh_interval = refresh_interval
         self.states: list[TaskState] = []
 
@@ -758,6 +805,7 @@ class CyberGymMonitor(App):
         table.add_column("Task ID", width=22)
         table.add_column("Status", width=12)
         table.add_column("Step", width=7)
+        table.add_column("Submit", width=7)
         table.add_column("Progress", width=27)
         table.add_column("Cost", width=9)
         table.add_column("Wall", width=7)
@@ -766,7 +814,7 @@ class CyberGymMonitor(App):
         self.set_interval(self.refresh_interval, self.do_refresh)
 
     def do_refresh(self) -> None:
-        self.states = scan_log_dir(self.log_dir, self.task_list, self.max_iter)
+        self.states = scan_log_dir(self.log_dir, self.task_list)
         self._update_table()
         self._update_stats()
 
@@ -805,6 +853,7 @@ class CyberGymMonitor(App):
                 s.task_id,
                 s.status,
                 f"{s.step}/{s.max_iter}",
+                str(s.submit_count) if s.submit_count > 0 else "—",
                 progress_bar,
                 cost_str,
                 wall,
@@ -924,10 +973,8 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="CyberGym Task Monitor")
-    parser.add_argument("--log-dir", type=str, default=None, help="Log directory to monitor")
-    parser.add_argument("--out-dir", type=str, default="/data/cybergym_data/cybergym-eval-data/eval_minimax_m2_5", help="Output directory (log-dir defaults to <out-dir>/logs)")
+    parser.add_argument("--log-dir", type=str, required=True, help="Log directory to monitor (e.g. eval_minimax_m2_5_abc12345/logs)")
     parser.add_argument("--tasks", type=str, default=None, help="Path to TASKS file (one task ID per line)")
-    parser.add_argument("--max-iter", type=int, default=72, help="Max iterations per task")
     parser.add_argument("--refresh", type=float, default=30.0, help="Refresh interval in seconds")
     args = parser.parse_args()
 
@@ -945,20 +992,15 @@ def main():
         sys.exit(1)
 
     # Get log dir
-    if args.log_dir:
-        log_dir = Path(args.log_dir)
-    else:
-        p = Path(args.out_dir)
-        if not p.is_absolute():
-            p = project_dir / p
-        log_dir = p / "logs"
+    log_dir = Path(args.log_dir)
+    if not log_dir.is_absolute():
+        log_dir = project_dir / log_dir
 
     print(f"Monitoring {len(task_list)} tasks in {log_dir}")
 
     app = CyberGymMonitor(
         log_dir=log_dir,
         task_list=task_list,
-        max_iter=args.max_iter,
         refresh_interval=args.refresh,
     )
     app.run()
