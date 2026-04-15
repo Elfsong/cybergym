@@ -41,56 +41,9 @@ class TaskState:
     submit_count: int = 0
 
 
-def parse_event_stream(task_dir: Path) -> dict | None:
-    """Parse OpenHands event stream files for real-time progress.
-
-    OpenHands writes individual event JSON files to
-    file/sessions/<sid>/events/{0,1,2,...}.json in real time, while the
-    trajectory file is only written once the task finishes. This function
-    reads those per-event files so the monitor can show live progress.
-    """
-    sessions_dir = task_dir / "file" / "sessions"
-    if not sessions_dir.exists():
-        return None
-
-    # Find the session directory (there should be exactly one)
-    session_dirs = [d for d in sessions_dir.iterdir() if d.is_dir()]
-    if not session_dirs:
-        return None
-    events_dir = session_dirs[0] / "events"
-    if not events_dir.exists():
-        return None
-
-    # Read all event files, sorted numerically
-    event_files = sorted(events_dir.glob("*.json"), key=lambda p: int(p.stem))
-    if not event_files:
-        return None
-
-    data = []
-    for ef in event_files:
-        try:
-            with open(ef) as f:
-                data.append(json.load(f))
-        except Exception:
-            continue
-
-    if not data:
-        return None
-
-    step_count = sum(
-        1 for e in data
-        if e.get("source") == "agent" and (e.get("action") or e.get("observation") == "error")
-    )
-
-    # Last action description
-    agent_steps = [e for e in data if e.get("source") == "agent" and e.get("action")]
-    last_action = ""
-    if agent_steps:
-        last = agent_steps[-1]
-        last_action = last.get("message") or last.get("action", "")
-
-    # PoC status
-    poc_status = "RUNNING"
+def _parse_poc_status(data: list[dict]) -> tuple[str, int]:
+    """Parse submit.sh results from events. Returns (status, submit_count)."""
+    status = "RUNNING"
     submit_count = 0
     for i, item in enumerate(data):
         cmd = str(item.get("args", {}).get("command", ""))
@@ -99,63 +52,74 @@ def parse_event_stream(task_dir: Path) -> dict | None:
             if i + 1 < len(data):
                 content = str(data[i + 1].get("content", ""))
                 try:
-                    json_start = content.find("{")
-                    if json_start < 0:
-                        continue
-                    json_end = content.find("}", json_start)
-                    if json_end < 0:
-                        continue
-                    result = json.loads(content[json_start : json_end + 1])
-                    ec = result.get("exit_code", None)
-                    if ec is None:
-                        continue
-                    if ec != 0:
-                        poc_status = "PASSED"
-                        break
-                    else:
-                        poc_status = "FAILED"
+                    js = content.find("{")
+                    je = content.find("}", js) if js >= 0 else -1
+                    if js >= 0 and je >= 0:
+                        ec = json.loads(content[js : je + 1]).get("exit_code")
+                        if ec is None:
+                            continue
+                        if ec != 0:
+                            return "PASSED", submit_count
+                        status = "FAILED"
                 except Exception:
                     pass
+    return status, submit_count
 
-    has_finish = any(e.get("action") == "finish" for e in data)
 
-    # Extract termination reason from agent_state_changed event
-    end_reason = ""
-    for e in reversed(data):
-        if e.get("observation") == "agent_state_changed":
-            end_reason = e.get("extras", {}).get("reason", "")
-            break
-
-    # Cost / tokens from last llm_metrics
-    cost = 0.0
-    prompt_tokens = 0
-    completion_tokens = 0
-    cache_tokens = 0
+def _extract_llm_metrics(data: list[dict]) -> tuple[float, int, int, int]:
+    """Extract accumulated cost and token usage. Returns (cost, prompt, completion, cache)."""
     for e in reversed(data):
         m = e.get("llm_metrics")
         if m and "accumulated_cost" in m:
-            cost = m["accumulated_cost"]
-            usage = m.get("accumulated_token_usage", {})
-            prompt_tokens = usage.get("prompt_tokens", 0)
-            completion_tokens = usage.get("completion_tokens", 0)
-            cache_tokens = usage.get("cache_read_tokens", 0)
-            break
+            u = m.get("accumulated_token_usage", {})
+            return (
+                m["accumulated_cost"],
+                u.get("prompt_tokens", 0),
+                u.get("completion_tokens", 0),
+                u.get("cache_read_tokens", 0),
+            )
+    return 0.0, 0, 0, 0
 
-    # Start time
-    start_time = ""
-    if data:
-        start_time = data[0].get("timestamp", "")[:19]
 
-    # Wall time
-    wall_seconds = 0
-    if len(data) >= 2:
-        try:
-            from datetime import datetime
-            t0 = datetime.fromisoformat(data[0]["timestamp"])
-            t1 = datetime.fromisoformat(data[-1]["timestamp"])
-            wall_seconds = int((t1 - t0).total_seconds())
-        except Exception:
-            pass
+def _extract_end_reason(data: list[dict]) -> str:
+    """Extract termination reason from agent_state_changed event."""
+    for e in reversed(data):
+        if e.get("observation") == "agent_state_changed":
+            return e.get("extras", {}).get("reason", "")
+    return ""
+
+
+def _calc_wall_seconds(data: list[dict]) -> int:
+    """Calculate wall time from first/last event timestamps."""
+    if len(data) < 2:
+        return 0
+    try:
+        from datetime import datetime
+        t0 = datetime.fromisoformat(data[0]["timestamp"])
+        t1 = datetime.fromisoformat(data[-1]["timestamp"])
+        return int((t1 - t0).total_seconds())
+    except Exception:
+        return 0
+
+
+def _analyze_events(data: list[dict]) -> dict:
+    """Shared analysis of an event list. Used by both parsers."""
+    step_count = sum(
+        1 for e in data
+        if e.get("source") == "agent" and (e.get("action") or e.get("observation") == "error")
+    )
+    agent_actions = [e for e in data if e.get("source") == "agent" and e.get("action")]
+    last_action = ""
+    if agent_actions:
+        last = agent_actions[-1]
+        last_action = last.get("message") or last.get("action", "")
+
+    poc_status, submit_count = _parse_poc_status(data)
+    has_finish = any(e.get("action") == "finish" for e in data)
+    end_reason = _extract_end_reason(data)
+    cost, prompt_tokens, completion_tokens, cache_tokens = _extract_llm_metrics(data)
+    start_time = data[0].get("timestamp", "")[:19] if data else ""
+    wall_seconds = _calc_wall_seconds(data)
 
     return {
         "steps": step_count,
@@ -173,6 +137,38 @@ def parse_event_stream(task_dir: Path) -> dict | None:
     }
 
 
+def _load_event_stream(task_dir: Path) -> list[dict] | None:
+    """Load events from the live event stream directory."""
+    sessions_dir = task_dir / "file" / "sessions"
+    if not sessions_dir.exists():
+        return None
+    session_dirs = [d for d in sessions_dir.iterdir() if d.is_dir()]
+    if not session_dirs:
+        return None
+    events_dir = session_dirs[0] / "events"
+    if not events_dir.exists():
+        return None
+    event_files = sorted(events_dir.glob("*.json"), key=lambda p: int(p.stem))
+    if not event_files:
+        return None
+    data = []
+    for ef in event_files:
+        try:
+            with open(ef) as f:
+                data.append(json.load(f))
+        except Exception:
+            continue
+    return data or None
+
+
+def parse_event_stream(task_dir: Path) -> dict | None:
+    """Parse OpenHands event stream files for real-time progress."""
+    data = _load_event_stream(task_dir)
+    if not data:
+        return None
+    return _analyze_events(data)
+
+
 def parse_trajectory(traj_path: Path) -> dict:
     """Parse a trajectory file and extract progress info."""
     try:
@@ -180,82 +176,7 @@ def parse_trajectory(traj_path: Path) -> dict:
             data = json.load(f)
     except Exception:
         return {}
-
-    step_count = sum(
-        1 for e in data
-        if e.get("source") == "agent" and (e.get("action") or e.get("observation") == "error")
-    )
-
-    # Last action description
-    agent_actions = [e for e in data if e.get("source") == "agent" and e.get("action")]
-    last_action = ""
-    if agent_actions:
-        last = agent_actions[-1]
-        last_action = last.get("message") or last.get("action", "")
-
-    # PoC status
-    poc_status = "RUNNING"
-    submit_count = 0
-    for i, item in enumerate(data):
-        cmd = str(item.get("args", {}).get("command", ""))
-        if "submit.sh" in cmd and "cat" not in cmd:
-            submit_count += 1
-            if i + 1 < len(data):
-                content = str(data[i + 1].get("content", ""))
-                try:
-                    json_start = content.find("{")
-                    if json_start < 0:
-                        continue
-                    json_end = content.find("}", json_start)
-                    if json_end < 0:
-                        continue
-                    result = json.loads(content[json_start : json_end + 1])
-                    ec = result.get("exit_code", None)
-                    if ec is None:
-                        continue
-                    if ec != 0:
-                        poc_status = "PASSED"
-                        break
-                    else:
-                        poc_status = "FAILED"
-                except Exception:
-                    pass
-
-    has_finish = any(e.get("action") == "finish" for e in data)
-
-    # Cost / tokens from last llm_metrics
-    cost = 0.0
-    prompt_tokens = 0
-    completion_tokens = 0
-    cache_tokens = 0
-    for e in reversed(data):
-        m = e.get("llm_metrics")
-        if m and "accumulated_cost" in m:
-            cost = m["accumulated_cost"]
-            usage = m.get("accumulated_token_usage", {})
-            prompt_tokens = usage.get("prompt_tokens", 0)
-            completion_tokens = usage.get("completion_tokens", 0)
-            cache_tokens = usage.get("cache_read_tokens", 0)
-            break
-
-    # Start time
-    start_time = ""
-    if data:
-        start_time = data[0].get("timestamp", "")[:19]
-
-    return {
-        "steps": step_count,
-        "status": poc_status,
-        "cost": cost,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "cache_tokens": cache_tokens,
-        "last_action": last_action,
-        "start_time": start_time,
-        "submit_count": submit_count,
-        "has_finish": has_finish,
-        "end_reason": "",
-    }
+    return _analyze_events(data)
 
 
 def _get_alive_task_ids() -> set[str]:
@@ -352,20 +273,7 @@ def scan_log_dir(log_dir: Path, task_list: list[str], max_iter: int) -> list[Tas
                 data = json.load(f)
         except Exception:
             return False
-        for i, item in enumerate(data):
-            cmd = str(item.get("args", {}).get("command", ""))
-            if "submit.sh" in cmd and "cat" not in cmd and i + 1 < len(data):
-                content = str(data[i + 1].get("content", ""))
-                try:
-                    js = content.find("{")
-                    je = content.find("}", js) if js >= 0 else -1
-                    if js >= 0 and je >= 0:
-                        ec = json.loads(content[js : je + 1]).get("exit_code")
-                        if ec is not None and ec != 0:
-                            return True
-                except Exception:
-                    pass
-        return False
+        return _parse_poc_status(data)[0] == "PASSED"
 
     existing_dirs: dict[str, Path] = {}
     passed_cache: dict[Path, bool] = {}
@@ -423,10 +331,22 @@ def scan_log_dir(log_dir: Path, task_list: list[str], max_iter: int) -> list[Tas
             if live_info and (live_info.get("steps", 0) > 0 or not info):
                 info = live_info
         elif not info.get("end_reason"):
-            # Trajectory lacks end_reason; supplement from event stream
-            live_info = parse_event_stream(task_dir)
-            if live_info and live_info.get("end_reason"):
-                info["end_reason"] = live_info["end_reason"]
+            # Trajectory lacks end_reason; check last few event files cheaply
+            sessions_dir = task_dir / "file" / "sessions"
+            if sessions_dir.exists():
+                sdirs = [sd for sd in sessions_dir.iterdir() if sd.is_dir()]
+                if sdirs:
+                    edir = sdirs[0] / "events"
+                    if edir.exists():
+                        for ef in sorted(edir.glob("*.json"), key=lambda p: -int(p.stem))[:5]:
+                            try:
+                                with open(ef) as f:
+                                    e = json.load(f)
+                                if e.get("observation") == "agent_state_changed":
+                                    info["end_reason"] = e.get("extras", {}).get("reason", "")
+                                    break
+                            except Exception:
+                                continue
 
         if not info:
             state.status = "STARTING"
@@ -632,84 +552,32 @@ class TrajectoryScreen(Screen):
 
     def _summarize_events(self, events: list[dict]) -> dict:
         """Extract summary stats from events."""
-        agent_steps = sum(
-            1 for e in events
-            if e.get("source") == "agent" and (e.get("action") or e.get("observation") == "error")
-        )
+        base = _analyze_events(events)
         run_count = sum(1 for e in events if e.get("action") == "run")
         read_count = sum(1 for e in events if e.get("action") == "read")
-        submit_count = 0
-        status = "RUNNING"
+        end_time = events[-1].get("timestamp", "")[:19] if events else ""
 
-        for i, item in enumerate(events):
-            cmd = str(item.get("args", {}).get("command", ""))
-            if "submit.sh" in cmd and "cat" not in cmd:
-                submit_count += 1
-                if i + 1 < len(events):
-                    content = str(events[i + 1].get("content", ""))
-                    try:
-                        js = content.find("{")
-                        je = content.find("}", js)
-                        if js >= 0 and je >= 0:
-                            r = json.loads(content[js : je + 1])
-                            ec = r.get("exit_code")
-                            if ec is not None:
-                                status = "PASSED" if ec != 0 else "FAILED"
-                                if status == "PASSED":
-                                    break
-                    except Exception:
-                        pass
-
-        # finished without submit — classify termination
+        # Classify terminal status
+        status = base["status"]
         if status == "RUNNING":
-            has_finish = any(e.get("action") == "finish" for e in events)
-            if has_finish:
+            if base["has_finish"]:
                 status = "NO_SUBMIT"
             else:
-                end_reason = ""
-                for e in reversed(events):
-                    if e.get("observation") == "agent_state_changed":
-                        end_reason = e.get("extras", {}).get("reason", "")
-                        break
-                status = _classify_termination({"end_reason": end_reason})
-
-        cost = 0.0
-        prompt_tokens = compl_tokens = cache_tokens = 0
-        for e in reversed(events):
-            m = e.get("llm_metrics")
-            if m and "accumulated_cost" in m:
-                cost = m["accumulated_cost"]
-                u = m.get("accumulated_token_usage", {})
-                prompt_tokens = u.get("prompt_tokens", 0)
-                compl_tokens = u.get("completion_tokens", 0)
-                cache_tokens = u.get("cache_read_tokens", 0)
-                break
-
-        start_time = events[0].get("timestamp", "")[:19] if events else ""
-        end_time = events[-1].get("timestamp", "")[:19] if events else ""
-        wall_seconds = 0
-        if len(events) >= 2:
-            try:
-                from datetime import datetime
-                t0 = datetime.fromisoformat(events[0]["timestamp"])
-                t1 = datetime.fromisoformat(events[-1]["timestamp"])
-                wall_seconds = int((t1 - t0).total_seconds())
-            except Exception:
-                pass
+                status = _classify_termination(base)
 
         return {
-            "agent_steps": agent_steps,
+            "agent_steps": base["steps"],
             "run_count": run_count,
             "read_count": read_count,
-            "submit_count": submit_count,
+            "submit_count": base["submit_count"],
             "status": status,
-            "cost": cost,
-            "prompt_tokens": prompt_tokens,
-            "compl_tokens": compl_tokens,
-            "cache_tokens": cache_tokens,
-            "start_time": start_time,
+            "cost": base["cost"],
+            "prompt_tokens": base["prompt_tokens"],
+            "compl_tokens": base["completion_tokens"],
+            "cache_tokens": base["cache_tokens"],
+            "start_time": base["start_time"],
             "end_time": end_time,
-            "wall_seconds": wall_seconds,
+            "wall_seconds": base["wall_seconds"],
         }
 
     def _load_trajectory(self) -> None:
