@@ -184,10 +184,6 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
-cybergym-server-data
-eval_gemini_3_flash_preview
-eval_kimi_k2_5
-eval_qwen3_5_35b_a3b
 eval_*
 poc.db
 trajectory_viewer.py
