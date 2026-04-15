@@ -30,7 +30,7 @@ from textual.widgets import (
 class TaskState:
     task_id: str
     dir_name: str
-    status: str = "PENDING"  # PENDING, RUNNING, PASSED, FAILED, NO_SUBMIT, ERROR, TIMEOUT, INTERRUPTED
+    status: str = "PENDING"  # PENDING, RUNNING, PASSED, FAILED, NO_SUBMIT, MAX_ITER, TIMEOUT, INTERRUPTED
     step: int = 0
     max_iter: int = 64
     cost: float = 0.0
@@ -79,10 +79,13 @@ def parse_event_stream(task_dir: Path) -> dict | None:
     if not data:
         return None
 
-    agent_steps = [e for e in data if e.get("source") == "agent" and e.get("action")]
-    step_count = len(agent_steps)
+    step_count = sum(
+        1 for e in data
+        if e.get("source") == "agent" and (e.get("action") or e.get("observation") == "error")
+    )
 
     # Last action description
+    agent_steps = [e for e in data if e.get("source") == "agent" and e.get("action")]
     last_action = ""
     if agent_steps:
         last = agent_steps[-1]
@@ -116,29 +119,14 @@ def parse_event_stream(task_dir: Path) -> dict | None:
                 except Exception:
                     pass
 
-    # Check for finish action or dead process (task killed / interrupted)
-    if poc_status == "RUNNING":
-        has_finish = any(e.get("action") == "finish" for e in data)
-        if has_finish:
-            poc_status = "NO_SUBMIT"
-        else:
-            # Check if the run.py process for this task is still alive
-            import subprocess
-            task_id = data[0].get("args", {}).get("task", "") if data else ""
-            # Extract task_id from the first user message or dir name
-            dir_name = task_dir.name  # e.g. arvo_35165-uuid
-            task_norm = dir_name.rsplit("-", 1)[0] if "-" in dir_name else dir_name
-            task_id_original = task_norm.replace("_", ":", 1)  # arvo:35165
-            try:
-                result = subprocess.run(
-                    ["pgrep", "-f", f"--task_id {task_id_original}"],
-                    capture_output=True, timeout=2,
-                )
-                if result.returncode != 0:
-                    # No matching process found — task was killed
-                    poc_status = "INTERRUPTED"
-            except Exception:
-                pass
+    has_finish = any(e.get("action") == "finish" for e in data)
+
+    # Extract termination reason from agent_state_changed event
+    end_reason = ""
+    for e in reversed(data):
+        if e.get("observation") == "agent_state_changed":
+            end_reason = e.get("extras", {}).get("reason", "")
+            break
 
     # Cost / tokens from last llm_metrics
     cost = 0.0
@@ -182,6 +170,8 @@ def parse_event_stream(task_dir: Path) -> dict | None:
         "start_time": start_time,
         "submit_count": submit_count,
         "wall_seconds": wall_seconds,
+        "has_finish": has_finish,
+        "end_reason": end_reason,
     }
 
 
@@ -193,13 +183,16 @@ def parse_trajectory(traj_path: Path) -> dict:
     except Exception:
         return {}
 
-    agent_steps = [e for e in data if e.get("source") == "agent" and e.get("action")]
-    step_count = len(agent_steps)
+    step_count = sum(
+        1 for e in data
+        if e.get("source") == "agent" and (e.get("action") or e.get("observation") == "error")
+    )
 
     # Last action description
+    agent_actions = [e for e in data if e.get("source") == "agent" and e.get("action")]
     last_action = ""
-    if agent_steps:
-        last = agent_steps[-1]
+    if agent_actions:
+        last = agent_actions[-1]
         last_action = (last.get("message") or last.get("action", ""))[:80]
 
     # PoC status
@@ -229,6 +222,8 @@ def parse_trajectory(traj_path: Path) -> dict:
                         poc_status = "FAILED"
                 except Exception:
                     pass
+
+    has_finish = any(e.get("action") == "finish" for e in data)
 
     # Cost / tokens from last llm_metrics
     cost = 0.0
@@ -260,19 +255,89 @@ def parse_trajectory(traj_path: Path) -> dict:
         "last_action": last_action,
         "start_time": start_time,
         "submit_count": submit_count,
+        "has_finish": has_finish,
+        "end_reason": "",
     }
+
+
+def _check_process_alive(task_id: str) -> bool:
+    """Check if the agent process for this task is still running."""
+    import subprocess as _sp
+    try:
+        result = _sp.run(
+            ["pgrep", "-f", "--", f"task_id {task_id}"],
+            capture_output=True, timeout=2,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _reconcile_status(info: dict, task_id: str) -> str:
+    """Reconcile raw parser status with process liveness and finish action.
+
+    Parser raw status (from submit.sh exit_code):
+        PASSED  — submit.sh called, exit_code != 0 (exploit worked)
+        FAILED  — submit.sh called, exit_code == 0 (exploit didn't work)
+        RUNNING — no submit.sh result found
+
+    Final status matrix:
+        PASSED  + *            + *     → PASSED       exploit succeeded
+        FAILED  + has_finish   + *     → FAILED       agent finished, exploit failed
+        FAILED  + no finish    + alive → RUNNING      submit failed, still retrying
+        FAILED  + no finish    + dead  → FAILED       process died after fail
+        RUNNING + has_finish   + *     → NO_SUBMIT    agent finished without submitting
+        RUNNING + no finish    + alive → RUNNING      still working
+        RUNNING + no finish    + dead  → _classify_termination()
+
+    _classify_termination uses end_reason from agent_state_changed:
+        "maximum iteration"  → MAX_ITER   agent exhausted iteration budget
+        "timeout" / wall_time exceeded → TIMEOUT    agent ran out of time
+        otherwise            → INTERRUPTED abnormal termination (OOM, kill, etc.)
+    """
+    status = info["status"]
+
+    if status == "PASSED":
+        return "PASSED"
+
+    has_finish = info.get("has_finish", False)
+    process_alive = _check_process_alive(task_id)
+
+    if status == "FAILED":
+        if has_finish or not process_alive:
+            return "FAILED"
+        return "RUNNING"
+
+    # status == "RUNNING" (no submit found)
+    if has_finish:
+        return "NO_SUBMIT"
+    if process_alive:
+        return "RUNNING"
+    return _classify_termination(info)
+
+
+def _classify_termination(info: dict) -> str:
+    """Classify why a task terminated without submit or finish."""
+    end_reason = info.get("end_reason", "")
+    if "maximum iteration" in end_reason:
+        return "MAX_ITER"
+    if "timeout" in end_reason.lower() or "timed out" in end_reason.lower():
+        return "TIMEOUT"
+    return "INTERRUPTED"
 
 
 def scan_log_dir(log_dir: Path, task_list: list[str], max_iter: int) -> list[TaskState]:
     """Scan the log directory and build task states."""
-    # Build map: task_id_normalized -> dir
-    existing_dirs = {}
+    # Build map: task_id_normalized -> newest dir (by mtime)
+    existing_dirs: dict[str, Path] = {}
     if log_dir.exists():
         for d in log_dir.iterdir():
             if d.is_dir():
                 # dir name format: arvo_8933-<uuid>
                 task_norm = d.name.rsplit("-", 1)[0] if "-" in d.name else d.name
-                existing_dirs[task_norm] = d
+                prev = existing_dirs.get(task_norm)
+                if prev is None or d.stat().st_mtime > prev.stat().st_mtime:
+                    existing_dirs[task_norm] = d
 
     states = []
     for task_id in task_list:
@@ -307,6 +372,11 @@ def scan_log_dir(log_dir: Path, task_list: list[str], max_iter: int) -> list[Tas
             live_info = parse_event_stream(task_dir)
             if live_info and (live_info.get("steps", 0) > 0 or not info):
                 info = live_info
+        elif not info.get("end_reason"):
+            # Trajectory lacks end_reason; supplement from event stream
+            live_info = parse_event_stream(task_dir)
+            if live_info and live_info.get("end_reason"):
+                info["end_reason"] = live_info["end_reason"]
 
         if not info:
             state.status = "STARTING"
@@ -314,7 +384,7 @@ def scan_log_dir(log_dir: Path, task_list: list[str], max_iter: int) -> list[Tas
             continue
 
         state.step = info["steps"]
-        state.status = info["status"]
+        state.status = _reconcile_status(info, task_id)
         state.cost = info["cost"]
         state.prompt_tokens = info["prompt_tokens"]
         state.completion_tokens = info["completion_tokens"]
@@ -348,9 +418,9 @@ STATUS_STYLES = {
     "PENDING": "[dim]PENDING[/]",
     "STARTING": "[bold yellow]STARTING[/]",
     "NO_SUBMIT": "[yellow]NO_SUBMIT[/]",
-    "ERROR": "[bold red]ERROR[/]",
+    "MAX_ITER": "[bold magenta]MAX_ITER[/]",
     "TIMEOUT": "[bold magenta]TIMEOUT[/]",
-    "INTERRUPTED": "[bold magenta]INTERRUPTED[/]",
+    "INTERRUPTED": "[bold red]INTERRUPTED[/]",
 }
 
 STATUS_ICONS = {
@@ -360,7 +430,7 @@ STATUS_ICONS = {
     "PENDING": "○",
     "STARTING": "◑",
     "NO_SUBMIT": "—",
-    "ERROR": "!",
+    "MAX_ITER": "⟲",
     "TIMEOUT": "⏱",
     "INTERRUPTED": "⚡",
 }
@@ -512,7 +582,10 @@ class TrajectoryScreen(Screen):
 
     def _summarize_events(self, events: list[dict]) -> dict:
         """Extract summary stats from events."""
-        agent_steps = sum(1 for e in events if e.get("source") == "agent" and e.get("action"))
+        agent_steps = sum(
+            1 for e in events
+            if e.get("source") == "agent" and (e.get("action") or e.get("observation") == "error")
+        )
         run_count = sum(1 for e in events if e.get("action") == "run")
         read_count = sum(1 for e in events if e.get("action") == "read")
         submit_count = 0
@@ -537,12 +610,18 @@ class TrajectoryScreen(Screen):
                     except Exception:
                         pass
 
-        # finished without submit
+        # finished without submit — classify termination
         if status == "RUNNING":
-            for e in events:
-                if e.get("action") == "finish":
-                    status = "NO_SUBMIT"
-                    break
+            has_finish = any(e.get("action") == "finish" for e in events)
+            if has_finish:
+                status = "NO_SUBMIT"
+            else:
+                end_reason = ""
+                for e in reversed(events):
+                    if e.get("observation") == "agent_state_changed":
+                        end_reason = e.get("extras", {}).get("reason", "")
+                        break
+                status = _classify_termination({"end_reason": end_reason})
 
         cost = 0.0
         prompt_tokens = compl_tokens = cache_tokens = 0
@@ -779,7 +858,7 @@ class CyberGymMonitor(App):
     def _sorted_states(self) -> list[TaskState]:
         status_order = {
             "RUNNING": 0, "STARTING": 1, "PASSED": 2, "FAILED": 3,
-            "NO_SUBMIT": 4, "INTERRUPTED": 5, "ERROR": 6, "TIMEOUT": 7, "PENDING": 8,
+            "NO_SUBMIT": 4, "MAX_ITER": 5, "TIMEOUT": 6, "INTERRUPTED": 7, "PENDING": 8,
         }
         if self.sort_key == "status":
             return sorted(self.states, key=lambda s: status_order.get(s.status, 99))
@@ -847,7 +926,7 @@ class CyberGymMonitor(App):
     def _update_stats(self) -> None:
         total = len(self.states)
         passed = sum(1 for s in self.states if s.status == "PASSED")
-        failed = sum(1 for s in self.states if s.status == "FAILED")
+        failed = sum(1 for s in self.states if s.status in ("FAILED", "NO_SUBMIT", "MAX_ITER", "TIMEOUT", "INTERRUPTED"))
         running = sum(1 for s in self.states if s.status in ("RUNNING", "STARTING"))
         pending = sum(1 for s in self.states if s.status == "PENDING")
         total_cost = sum(s.cost for s in self.states)
@@ -857,7 +936,7 @@ class CyberGymMonitor(App):
         stats.update_stats(total, passed, failed, running, pending, total_cost, total_steps)
 
         # Update progress bar
-        completed = sum(1 for s in self.states if s.status in ("PASSED", "FAILED", "NO_SUBMIT", "ERROR", "TIMEOUT", "INTERRUPTED"))
+        completed = sum(1 for s in self.states if s.status in ("PASSED", "FAILED", "NO_SUBMIT", "MAX_ITER", "TIMEOUT", "INTERRUPTED"))
         pbar = self.query_one("#progress-bar", ProgressBar)
         pbar.update(progress=completed)
 
@@ -920,24 +999,14 @@ class CyberGymMonitor(App):
         self._update_table()
 
 
-def parse_task_list_from_script(script_path: Path) -> list[str]:
-    """Extract TASKS array from the bash script."""
+def parse_task_list_from_file(tasks_path: Path) -> list[str]:
+    """Read task IDs from a TASKS file (one per line, # comments and blanks skipped)."""
     tasks = []
-    in_tasks = False
-    with open(script_path) as f:
+    with open(tasks_path) as f:
         for line in f:
             stripped = line.strip()
-            if stripped.startswith("TASKS=("):
-                in_tasks = True
-                continue
-            if in_tasks:
-                if stripped == ")":
-                    break
-                # Extract quoted string
-                if '"' in stripped:
-                    task = stripped.strip('" ')
-                    if task:
-                        tasks.append(task)
+            if stripped and not stripped.startswith("#"):
+                tasks.append(stripped)
     return tasks
 
 
@@ -957,7 +1026,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="CyberGym Task Monitor")
     parser.add_argument("--log-dir", type=str, default=None, help="Log directory to monitor")
-    parser.add_argument("--script", type=str, default=None, help="Path to run_vllm_eval.sh to extract task list")
+    parser.add_argument("--tasks", type=str, default=None, help="Path to TASKS file (one task ID per line)")
     parser.add_argument("--max-iter", type=int, default=64, help="Max iterations per task")
     parser.add_argument("--refresh", type=float, default=30.0, help="Refresh interval in seconds")
     args = parser.parse_args()
@@ -965,21 +1034,22 @@ def main():
     project_dir = Path(__file__).parent
 
     # Get task list
-    script_path = Path(args.script) if args.script else project_dir / "run_vllm_eval.sh"
-    if not script_path.exists():
-        print(f"Script not found: {script_path}")
+    tasks_path = Path(args.tasks) if args.tasks else project_dir / "TASKS"
+    if not tasks_path.exists():
+        print(f"TASKS file not found: {tasks_path}")
         sys.exit(1)
 
-    task_list = parse_task_list_from_script(script_path)
+    task_list = parse_task_list_from_file(tasks_path)
     if not task_list:
-        print("No tasks found in script.")
+        print(f"No tasks found in {tasks_path}")
         sys.exit(1)
 
     # Get log dir
     if args.log_dir:
         log_dir = Path(args.log_dir)
     else:
-        out_dir = parse_out_dir_from_script(script_path)
+        script_path = project_dir / "run_vllm_eval.sh"
+        out_dir = parse_out_dir_from_script(script_path) if script_path.exists() else None
         if out_dir:
             p = Path(out_dir)
             if not p.is_absolute():
