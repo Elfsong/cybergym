@@ -40,19 +40,44 @@ curl http://localhost:8666/health
 ## Step 3: Run the Evaluation (background)
 
 ```bash
-nohup bash run_vllm_eval.sh > eval.log 2>&1 &
+nohup uv run python3 run_eval_tasks.py > /data/cybergym_data/cybergym-eval-data/eval_minimax_m2_5/run.log 2>&1 &
 ```
 
-Runs all tasks with 8-way parallelism. Results go to `./eval_minimax_m2_5/logs/`.
+Results go to `/data/cybergym_data/cybergym-eval-data/eval_minimax_m2_5/logs/`.
 
 Options:
 
-- `-v` / `--verbose` — show full agent interaction output
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--model` | `openai/MiniMaxAI/MiniMax-M2.5` | Model name |
+| `--base-url` | `http://localhost:8000/v1` | vLLM API endpoint |
+| `--out-dir` | `/data/cybergym_data/cybergym-eval-data/eval_minimax_m2_5` | Output directory |
+| `--data-dir` | `/data/cybergym_data/cybergym-benchmark-data/data` | Benchmark data directory |
+| `--tasks-file` | `TASKS` (in script dir) | Task list file |
+| `--parallel` | `36` | Number of parallel tasks |
+| `--max-iter` | `72` | Max agent iterations per task |
+| `--max-output-tokens` | `8192` | Max LLM output tokens per call |
+| `--timeout` | `1800` | Task timeout in seconds |
+| `--difficulty` | `level1` | Task difficulty filter |
+| `-v` / `--verbose` | off | Show full agent interaction output |
+
+Example with custom settings:
+
+```bash
+nohup uv run python3 run_eval_tasks.py --parallel 24 --max-iter 96 --tasks-file FULL_TASKS > run.log 2>&1 &
+```
+
+## Task Files
+
+- `TASKS` — current evaluation task list (300 tasks)
+- `FULL_TASKS` — all available tasks (1507 tasks)
+
+One task ID per line. Supports `#` comments and blank lines.
 
 ## Step 4: Monitor Progress (foreground)
 
 ```bash
-uv run monitor.py
+uv run python3 monitor.py
 ```
 
 Opens a TUI dashboard showing real-time task status, cost, and progress.
@@ -61,9 +86,10 @@ Options:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--log-dir` | auto-detected from script | Log directory to monitor |
-| `--script` | `run_vllm_eval.sh` | Script to extract task list from |
-| `--max-iter` | `64` | Max iterations per task |
+| `--log-dir` | `<out-dir>/logs` | Log directory to monitor |
+| `--out-dir` | `/data/cybergym_data/cybergym-eval-data/eval_minimax_m2_5` | Output directory |
+| `--tasks` | `TASKS` (in script dir) | Task list file |
+| `--max-iter` | `72` | Max iterations per task |
 | `--refresh` | `30.0` | Refresh interval in seconds |
 
 Keybindings in the TUI:
@@ -84,13 +110,24 @@ Keybindings in the TUI:
 ## Quick Start (all-in-one)
 
 ```bash
-# Terminal 1 — start servers in background
+# Start servers in background
 nohup bash start_vllm_server.sh > vllm_server.log 2>&1 &
 nohup bash start_cybergym_server.sh > cybergym_server.log 2>&1 &
 
 # Wait for servers to be ready, then run eval
-nohup bash run_vllm_eval.sh > eval.log 2>&1 &
+nohup uv run python3 run_eval_tasks.py > /data/cybergym_data/cybergym-eval-data/eval_minimax_m2_5/run.log 2>&1 &
 
-# Terminal 2 — monitor
-python3 monitor.py
+# Monitor
+uv run python3 monitor.py
 ```
+
+## Checking vLLM Pressure
+
+```bash
+curl -s http://localhost:8000/metrics | grep -E 'vllm:(num_requests_running|num_requests_waiting|kv_cache_usage_perc|num_preemptions_total)' | grep -v '#'
+```
+
+Key indicators:
+- `num_requests_waiting > 0` sustained — reduce `--parallel`
+- `kv_cache_usage_perc > 0.8` — reduce `--parallel` or `--max-output-tokens`
+- `num_preemptions_total` increasing — reduce `--parallel` immediately

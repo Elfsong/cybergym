@@ -4,15 +4,13 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal
 from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import (
@@ -89,7 +87,7 @@ def parse_event_stream(task_dir: Path) -> dict | None:
     last_action = ""
     if agent_steps:
         last = agent_steps[-1]
-        last_action = (last.get("message") or last.get("action", ""))[:80]
+        last_action = last.get("message") or last.get("action", "")
 
     # PoC status
     poc_status = "RUNNING"
@@ -193,7 +191,7 @@ def parse_trajectory(traj_path: Path) -> dict:
     last_action = ""
     if agent_actions:
         last = agent_actions[-1]
-        last_action = (last.get("message") or last.get("action", ""))[:80]
+        last_action = last.get("message") or last.get("action", "")
 
     # PoC status
     poc_status = "RUNNING"
@@ -794,6 +792,7 @@ class StatsBar(Static):
         passed: int,
         failed: int,
         running: int,
+        starting: int,
         pending: int,
         total_cost: float,
         total_steps: int,
@@ -801,14 +800,15 @@ class StatsBar(Static):
         completed = passed + failed
         pct = (passed / total * 100) if total > 0 else 0
         line = (
-            f"[bold green]Passed:[/] {passed}  │  "
-            f"[bold red]Failed:[/] {failed}  │  "
-            f"[bold cyan]Running:[/] {running}  │  "
-            f"[dim]Pending:[/] {pending}  │  "
-            f"[bold]Completed:[/] {completed}/{total}  │  "
-            f"[bold green]Pass Rate:[/] {pct:.1f}%  │  "
-            f"[bold yellow]Cost:[/] ${total_cost:.4f}  │  "
-            f"[bold]Steps:[/] {total_steps}"
+            f"[green]Passed:{passed}[/]  "
+            f"[red]Failed:{failed}[/]  "
+            f"[cyan]Running:{running}[/]  "
+            f"[yellow]Starting:{starting}[/]  "
+            f"[dim]Pending:{pending}[/]  │  "
+            f"Done:{completed}/{total}  "
+            f"[green]Rate:{pct:.1f}%[/]  │  "
+            f"[yellow]Cost:${total_cost:.4f}[/]  "
+            f"Steps:{total_steps}"
         )
         self.update(line)
 
@@ -886,19 +886,14 @@ class CyberGymMonitor(App):
         table = self.query_one(DataTable)
         table.cursor_type = "row"
         table.zebra_stripes = True
-        table.add_columns(
-            "",        # status icon
-            "Task ID",
-            "Status",
-            "Step",
-            "Progress",
-            "Submits",
-            "Cost",
-            "Prompt Tok",
-            "Compl Tok",
-            "Wall Time",
-            "Last Action",
-        )
+        table.add_column("", width=2)
+        table.add_column("Task ID", width=22)
+        table.add_column("Status", width=12)
+        table.add_column("Step", width=7)
+        table.add_column("Progress", width=27)
+        table.add_column("Cost", width=9)
+        table.add_column("Wall", width=7)
+        table.add_column("Last Action")
         self.do_refresh()
         self.set_interval(self.refresh_interval, self.do_refresh)
 
@@ -933,12 +928,9 @@ class CyberGymMonitor(App):
 
         for s in self._sorted_states():
             icon = STATUS_ICONS.get(s.status, "?")
-            pct = (s.step / s.max_iter * 100) if s.max_iter > 0 else 0
             progress_bar = self._make_progress_bar(s.step, s.max_iter, s.status)
             wall = f"{s.wall_seconds // 60}m{s.wall_seconds % 60:02d}s" if s.wall_seconds > 0 else "—"
             cost_str = f"${s.cost:.4f}" if s.cost > 0 else "—"
-            prompt_str = f"{s.prompt_tokens:,}" if s.prompt_tokens > 0 else "—"
-            compl_str = f"{s.completion_tokens:,}" if s.completion_tokens > 0 else "—"
 
             table.add_row(
                 icon,
@@ -946,12 +938,9 @@ class CyberGymMonitor(App):
                 s.status,
                 f"{s.step}/{s.max_iter}",
                 progress_bar,
-                str(s.submit_count) if s.submit_count > 0 else "—",
                 cost_str,
-                prompt_str,
-                compl_str,
                 wall,
-                s.last_action[:60] if s.last_action else "—",
+                s.last_action if s.last_action else "—",
                 key=s.task_id,
             )
 
@@ -979,13 +968,14 @@ class CyberGymMonitor(App):
         total = len(self.states)
         passed = sum(1 for s in self.states if s.status == "PASSED")
         failed = sum(1 for s in self.states if s.status in ("FAILED", "NO_SUBMIT", "MAX_ITER", "TIMEOUT", "INTERRUPTED"))
-        running = sum(1 for s in self.states if s.status in ("RUNNING", "STARTING"))
+        running = sum(1 for s in self.states if s.status == "RUNNING")
+        starting = sum(1 for s in self.states if s.status == "STARTING")
         pending = sum(1 for s in self.states if s.status == "PENDING")
         total_cost = sum(s.cost for s in self.states)
         total_steps = sum(s.step for s in self.states)
 
         stats = self.query_one(StatsBar)
-        stats.update_stats(total, passed, failed, running, pending, total_cost, total_steps)
+        stats.update_stats(total, passed, failed, running, starting, pending, total_cost, total_steps)
 
         # Update progress bar
         completed = sum(1 for s in self.states if s.status in ("PASSED", "FAILED", "NO_SUBMIT", "MAX_ITER", "TIMEOUT", "INTERRUPTED"))
@@ -1062,24 +1052,14 @@ def parse_task_list_from_file(tasks_path: Path) -> list[str]:
     return tasks
 
 
-def parse_out_dir_from_script(script_path: Path) -> str | None:
-    """Extract OUT_DIR from the bash script."""
-    import re
-    with open(script_path) as f:
-        for line in f:
-            m = re.match(r'^OUT_DIR\s*=\s*(.+)', line.strip())
-            if m:
-                return m.group(1).strip().strip('"').strip("'")
-    return None
-
-
 def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="CyberGym Task Monitor")
     parser.add_argument("--log-dir", type=str, default=None, help="Log directory to monitor")
+    parser.add_argument("--out-dir", type=str, default="/data/cybergym_data/cybergym-eval-data/eval_minimax_m2_5", help="Output directory (log-dir defaults to <out-dir>/logs)")
     parser.add_argument("--tasks", type=str, default=None, help="Path to TASKS file (one task ID per line)")
-    parser.add_argument("--max-iter", type=int, default=64, help="Max iterations per task")
+    parser.add_argument("--max-iter", type=int, default=72, help="Max iterations per task")
     parser.add_argument("--refresh", type=float, default=30.0, help="Refresh interval in seconds")
     args = parser.parse_args()
 
@@ -1100,15 +1080,10 @@ def main():
     if args.log_dir:
         log_dir = Path(args.log_dir)
     else:
-        script_path = project_dir / "run_vllm_eval.sh"
-        out_dir = parse_out_dir_from_script(script_path) if script_path.exists() else None
-        if out_dir:
-            p = Path(out_dir)
-            if not p.is_absolute():
-                p = project_dir / p
-            log_dir = p / "logs"
-        else:
-            log_dir = project_dir / "eval_minimax_m2_5" / "logs"
+        p = Path(args.out_dir)
+        if not p.is_absolute():
+            p = project_dir / p
+        log_dir = p / "logs"
 
     print(f"Monitoring {len(task_list)} tasks in {log_dir}")
 

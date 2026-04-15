@@ -1,23 +1,30 @@
-import glob, json, os, subprocess, sys, time
+#!/usr/bin/env python3
+"""CyberGym parallel evaluation runner."""
+
+import argparse
+import glob
+import json
+import os
+import subprocess
+import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-
-args = sys.argv[1:]
-parallel = int(args[0])
-total = int(args[1])
-verbose = args[2] == "true"
-model, base_url = args[3], args[4]
-out_dir = args[5]
-data_dir = args[6]
-server_ip, server_port = args[7], args[8]
-timeout_s, max_iter, max_output_tokens = args[9], args[10], args[11]
-silent, difficulty = args[12], args[13]
-tasks = args[14:]
-
-log_dir = f"{out_dir}/logs"
+from pathlib import Path
 
 
-def summarize_task(task_id, wall_time):
+def parse_tasks_file(path: str) -> list[str]:
+    """Read task IDs from a file (one per line, # comments and blanks skipped)."""
+    tasks = []
+    with open(path) as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                tasks.append(stripped)
+    return tasks
+
+
+def summarize_task(task_id: str, wall_time: int, log_dir: str) -> tuple:
     """Parse trajectory to extract status, cost, and token usage."""
     task_norm = task_id.replace(":", "_")
     wt_str = f"{wall_time // 60}m{wall_time % 60:02d}s"
@@ -87,7 +94,24 @@ def summarize_task(task_id, wall_time):
     return poc_status, cost, prompt_tokens, completion_tokens, cache_read_tokens
 
 
-def run_task(task_num, task_id):
+def run_task(
+    task_num: int,
+    task_id: str,
+    total: int,
+    *,
+    model: str,
+    base_url: str,
+    log_dir: str,
+    tmp_dir: str,
+    data_dir: str,
+    server: str,
+    timeout: str,
+    max_iter: str,
+    max_output_tokens: str,
+    silent: str,
+    difficulty: str,
+    verbose: bool,
+) -> tuple[int, str, int]:
     print(f"[{task_num}/{total}] [{datetime.now():%Y-%m-%d %H:%M:%S}] Starting: {task_id}", flush=True)
     start = time.monotonic()
     cmd = [
@@ -96,11 +120,11 @@ def run_task(task_num, task_id):
         "--model", model,
         "--base_url", base_url,
         "--log_dir", log_dir,
-        "--tmp_dir", f"{out_dir}/tmp",
+        "--tmp_dir", tmp_dir,
         "--data_dir", data_dir,
         "--task_id", task_id,
-        "--server", f"http://{server_ip}:{server_port}",
-        "--timeout", timeout_s,
+        "--server", server,
+        "--timeout", timeout,
         "--max_iter", max_iter,
         "--max_output_tokens", max_output_tokens,
         "--silent", silent,
@@ -108,42 +132,102 @@ def run_task(task_num, task_id):
     ]
     stderr = None if verbose else subprocess.DEVNULL
     try:
-        subprocess.run(cmd, stderr=stderr, timeout=int(timeout_s) + 300)
+        subprocess.run(cmd, stderr=stderr, timeout=int(timeout) + 300)
     except Exception as e:
         print(f"  [{task_num}/{total}] {task_id}: process error: {e}", flush=True)
     elapsed = int(time.monotonic() - start)
     return task_num, task_id, elapsed
 
 
-# Run all tasks with bounded parallelism
-results = []
-with ThreadPoolExecutor(max_workers=parallel) as pool:
-    futures = {
-        pool.submit(run_task, i + 1, tid): tid
-        for i, tid in enumerate(tasks)
-    }
-    for fut in as_completed(futures):
-        task_num, task_id, elapsed = fut.result()
-        result = summarize_task(task_id, elapsed)
-        results.append(result)
+def main():
+    parser = argparse.ArgumentParser(description="CyberGym parallel evaluation runner")
+    parser.add_argument("--model", default="openai/MiniMaxAI/MiniMax-M2.5")
+    parser.add_argument("--base-url", default="http://localhost:8000/v1")
+    parser.add_argument("--data-dir", default="/data/cybergym_data/cybergym-benchmark-data/data")
+    parser.add_argument("--out-dir", default="/data/cybergym_data/cybergym-eval-data/eval_minimax_m2_5")
+    parser.add_argument("--server-ip", default="172.17.0.1")
+    parser.add_argument("--server-port", default="8666")
+    parser.add_argument("--difficulty", default="level1")
+    parser.add_argument("--timeout", default="1800")
+    parser.add_argument("--max-iter", default="72")
+    parser.add_argument("--max-output-tokens", default="8192")
+    parser.add_argument("--parallel", type=int, default=36)
+    parser.add_argument("--tasks-file", default=None, help="Path to TASKS file (default: TASKS in script dir)")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args()
 
-# Tally results
-pass_count = sum(1 for r in results if r[0] == "PASSED")
-fail_count = sum(1 for r in results if r[0] == "FAILED")
-total_cost = sum(r[1] for r in results)
-total_prompt = sum(r[2] for r in results)
-total_compl = sum(r[3] for r in results)
-total_cache = sum(r[4] for r in results)
-total_tokens = total_prompt + total_compl
-other_count = len(results) - pass_count - fail_count
+    # Environment
+    os.environ.setdefault("LLM_API_KEY", "EMPTY")
 
-print("===========================================================")
-print(f"All {total} tasks completed. Passed: {pass_count}  Failed: {fail_count}  Other: {other_count}")
-print("-----------------------------------------------------------")
-print(f"Total cost:              ${total_cost:.4f}")
-print(f"Total prompt tokens:     {total_prompt}")
-print(f"Total completion tokens: {total_compl}")
-print(f"Total cache read tokens: {total_cache}")
-print(f"Total tokens:            {total_tokens}")
-print("-----------------------------------------------------------")
-print(f"Results in {log_dir}/")
+    # Task list
+    script_dir = Path(__file__).parent
+    tasks_file = args.tasks_file or str(script_dir / "TASKS")
+    if not Path(tasks_file).exists():
+        print(f"Error: TASKS file not found: {tasks_file}", file=sys.stderr)
+        sys.exit(1)
+    tasks = parse_tasks_file(tasks_file)
+    if not tasks:
+        print(f"Error: No tasks found in {tasks_file}", file=sys.stderr)
+        sys.exit(1)
+
+    total = len(tasks)
+    log_dir = f"{args.out_dir}/logs"
+    tmp_dir = f"{args.out_dir}/tmp"
+    os.makedirs(args.out_dir, exist_ok=True)
+    silent = "false" if args.verbose else "true"
+    server = f"http://{args.server_ip}:{args.server_port}"
+
+    print(f"Running {total} tasks (parallel: {args.parallel}, mode: {'verbose' if args.verbose else 'concise'})")
+    print(f"Model: {args.model} via vLLM ({args.base_url})")
+    print("===========================================================")
+
+    # Run all tasks with bounded parallelism
+    results = []
+    with ThreadPoolExecutor(max_workers=args.parallel) as pool:
+        futures = {
+            pool.submit(
+                run_task, i + 1, tid, total,
+                model=args.model,
+                base_url=args.base_url,
+                log_dir=log_dir,
+                tmp_dir=tmp_dir,
+                data_dir=args.data_dir,
+                server=server,
+                timeout=args.timeout,
+                max_iter=args.max_iter,
+                max_output_tokens=args.max_output_tokens,
+                silent=silent,
+                difficulty=args.difficulty,
+                verbose=args.verbose,
+            ): tid
+            for i, tid in enumerate(tasks)
+        }
+        for fut in as_completed(futures):
+            task_num, task_id, elapsed = fut.result()
+            result = summarize_task(task_id, elapsed, log_dir)
+            results.append(result)
+
+    # Tally results
+    pass_count = sum(1 for r in results if r[0] == "PASSED")
+    fail_count = sum(1 for r in results if r[0] == "FAILED")
+    total_cost = sum(r[1] for r in results)
+    total_prompt = sum(r[2] for r in results)
+    total_compl = sum(r[3] for r in results)
+    total_cache = sum(r[4] for r in results)
+    total_tokens = total_prompt + total_compl
+    other_count = len(results) - pass_count - fail_count
+
+    print("===========================================================")
+    print(f"All {total} tasks completed. Passed: {pass_count}  Failed: {fail_count}  Other: {other_count}")
+    print("-----------------------------------------------------------")
+    print(f"Total cost:              ${total_cost:.4f}")
+    print(f"Total prompt tokens:     {total_prompt}")
+    print(f"Total completion tokens: {total_compl}")
+    print(f"Total cache read tokens: {total_cache}")
+    print(f"Total tokens:            {total_tokens}")
+    print("-----------------------------------------------------------")
+    print(f"Results in {log_dir}/")
+
+
+if __name__ == "__main__":
+    main()
