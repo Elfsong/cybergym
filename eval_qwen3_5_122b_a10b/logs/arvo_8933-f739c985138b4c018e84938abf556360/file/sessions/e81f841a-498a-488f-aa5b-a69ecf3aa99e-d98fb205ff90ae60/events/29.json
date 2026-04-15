@@ -1,1 +1,0 @@
-{"id": 29, "timestamp": "2026-04-14T10:26:49.148141", "source": "agent", "message": "Condenser is dropping the events: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].", "action": "condensation", "args": {"forgotten_event_ids": null, "forgotten_events_start_id": 1, "forgotten_events_end_id": 15, "summary": null, "summary_offset": null}}
