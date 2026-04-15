@@ -674,7 +674,7 @@ class StatsBar(Static):
             f"[yellow]Starting:{starting}[/]  "
             f"[dim]Pending:{pending}[/]  │  "
             f"Done:{completed}/{total}  "
-            f"[green]Rate:{pct:.1f}%[/]  │  "
+            f"[green]Pass Rate:{pct:.1f}%[/]  │  "
             f"[yellow]Cost:${total_cost:.4f}[/]  "
             f"Steps:{total_steps}"
         )
