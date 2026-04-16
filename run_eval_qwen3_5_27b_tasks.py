@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CyberGym parallel evaluation runner."""
+"""CyberGym parallel evaluation runner for Qwen3.5-27B."""
 
 import argparse
 import glob
@@ -246,18 +246,18 @@ def _recover_trajectory(task_norm: str, log_dir: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CyberGym parallel evaluation runner")
-    parser.add_argument("--model", default="openai/MiniMaxAI/MiniMax-M2.5")
-    parser.add_argument("--base-url", default="http://localhost:8000/v1")
+    parser = argparse.ArgumentParser(description="CyberGym parallel evaluation runner (Qwen3.5-27B)")
+    parser.add_argument("--model", default="openai/Qwen/Qwen3.5-27B")
+    parser.add_argument("--base-url", default="http://localhost:8001/v1")
     parser.add_argument("--data-dir", default="/data/cybergym_data/cybergym-benchmark-data/data")
-    parser.add_argument("--out-dir", default="/data/cybergym_data/cybergym-eval-data/eval_minimax_m2_5")
+    parser.add_argument("--out-dir", default="/data/cybergym_data/cybergym-eval-data/eval_qwen3_5_27b")
     parser.add_argument("--server-ip", default="172.17.0.1")
     parser.add_argument("--server-port", default="8666")
     parser.add_argument("--difficulty", default="level1")
     parser.add_argument("--timeout", default="2400")
     parser.add_argument("--max-iter", default="72")
     parser.add_argument("--max-output-tokens", default="8192")
-    parser.add_argument("--parallel", type=int, default=36)
+    parser.add_argument("--parallel", type=int, default=48)
     parser.add_argument("--tasks-file", default=None, help="Path to TASKS file (default: TASKS in script dir)")
     parser.add_argument("--stagger", type=float, default=1.0, help="Seconds between task launches to avoid Docker startup storm (0 to disable)")
     parser.add_argument("-v", "--verbose", action="store_true")

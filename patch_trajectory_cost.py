@@ -16,39 +16,7 @@ import json
 import os
 import sys
 
-# Pricing: $ per million tokens
-PRICING = {
-    "MiniMax-M2.7": {
-        "input": 0.3, "output": 1.2, "cache_read": 0.06, "cache_write": 0.375,
-    },
-    "MiniMax-M2.7-highspeed": {
-        "input": 0.6, "output": 2.4, "cache_read": 0.06, "cache_write": 0.375,
-    },
-    "MiniMax-M2.5": {
-        "input": 0.3, "output": 1.2, "cache_read": 0.03, "cache_write": 0.375,
-    },
-    "MiniMax-M2.5-highspeed": {
-        "input": 0.6, "output": 2.4, "cache_read": 0.03, "cache_write": 0.375,
-    },
-}
-
-
-def get_pricing(model: str) -> dict | None:
-    """Match model string to pricing table."""
-    for key, prices in PRICING.items():
-        if key in model:
-            return prices
-    return None
-
-
-def compute_cost(prices: dict, usage: dict) -> float:
-    """Compute cost in USD from token counts."""
-    return (
-        usage.get("prompt_tokens", 0) * prices["input"]
-        + usage.get("completion_tokens", 0) * prices["output"]
-        + usage.get("cache_read_tokens", 0) * prices["cache_read"]
-        + usage.get("cache_write_tokens", 0) * prices["cache_write"]
-    ) / 1_000_000
+from pricing import compute_cost as _compute_cost
 
 
 def patch_trajectory(traj_path: str, dry_run: bool = False) -> tuple[bool, str]:
@@ -68,8 +36,8 @@ def patch_trajectory(traj_path: str, dry_run: bool = False) -> tuple[bool, str]:
     if not model:
         return False, "no llm_metrics found"
 
-    prices = get_pricing(model)
-    if prices is None:
+    # Quick check: does pricing exist for this model?
+    if _compute_cost(model) == 0.0:
         return False, f"no pricing for model: {model}"
 
     # Check if already patched (last accumulated_cost > 0)
@@ -86,7 +54,13 @@ def patch_trajectory(traj_path: str, dry_run: bool = False) -> tuple[bool, str]:
         m = entry.get("llm_metrics")
         if m and "accumulated_token_usage" in m:
             usage = m["accumulated_token_usage"]
-            m["accumulated_cost"] = round(compute_cost(prices, usage), 6)
+            m["accumulated_cost"] = round(_compute_cost(
+                model,
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                cache_read_tokens=usage.get("cache_read_tokens", 0),
+                cache_write_tokens=usage.get("cache_write_tokens", 0),
+            ), 6)
             patched += 1
 
     if patched == 0:

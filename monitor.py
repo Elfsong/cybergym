@@ -66,51 +66,12 @@ def _parse_poc_status(data: list[dict]) -> tuple[str, int]:
     return status, submit_count
 
 
-# Pricing: $ per million tokens (input, output, cache_read, cache_write)
-_PRICING = {
-    "MiniMax-M2.7":           (0.3,  1.2, 0.06, 0.375),
-    "MiniMax-M2.7-highspeed": (0.6,  2.4, 0.06, 0.375),
-    "MiniMax-M2.5":           (0.3,  1.2, 0.03, 0.375),
-    "MiniMax-M2.5-highspeed": (0.6,  2.4, 0.03, 0.375),
-}
-# Tinker API pricing (input, output) — no cache pricing
-_TINKER_PRICING = {
-    "Qwen/Qwen3-4B-Instruct-2507": (0.07, 0.22),
-    "Qwen/Qwen3-8B": (0.13, 0.40),
-    "Qwen/Qwen3-30B-A3B": (0.12, 0.30),
-    "Qwen/Qwen3-VL-30B-A3B-Instruct": (0.18, 0.44),
-    "Qwen/Qwen3-32B": (0.49, 1.47),
-    "Qwen/Qwen3-235B-Instruct-2507": (0.68, 1.70),
-    "Qwen/Qwen3-VL-235B-A22B-Instruct": (1.02, 2.56),
-    "Qwen/Qwen3.5-397B-A17B": (2.00, 5.00),
-    "Qwen/Qwen3.5-35B-A3B": (0.36, 0.89),
-    "Qwen/Qwen3.5-27B": (1.24, 3.73),
-    "Qwen/Qwen3.5-4B": (0.22, 0.67),
-    "meta-llama/Llama-3.2-1B": (0.03, 0.09),
-    "meta-llama/Llama-3.2-3B": (0.06, 0.18),
-    "meta-llama/Llama-3.1-8B": (0.13, 0.40),
-    "meta-llama/Llama-3.1-70B": (1.05, 3.16),
-    "deepseek-ai/DeepSeek-V3.1": (1.13, 2.81),
-    "gpt-oss/GPT-OSS-120B": (0.18, 0.44),
-    "gpt-oss/GPT-OSS-20B": (0.12, 0.30),
-    "moonshotai/Kimi-K2-Thinking": (0.98, 2.44),
-    "moonshotai/Kimi-K2.5": (1.47, 3.66),
-    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": (0.13, 0.33),
-}
+from pricing import compute_cost as _compute_cost_full
 
 
 def _compute_cost(model: str, prompt: int, completion: int, cache_read: int) -> float:
     """Compute cost in USD from token counts and model name."""
-    # Try MiniMax pricing first
-    for key, (inp, out, cr, _cw) in _PRICING.items():
-        if key in model:
-            return (prompt * inp + completion * out + cache_read * cr) / 1_000_000
-    # Try Tinker pricing
-    raw = model.removeprefix("openai/")
-    tp = _TINKER_PRICING.get(raw)
-    if tp:
-        return (prompt * tp[0] + completion * tp[1]) / 1_000_000
-    return 0.0
+    return _compute_cost_full(model, prompt_tokens=prompt, completion_tokens=completion, cache_read_tokens=cache_read)
 
 
 def _extract_llm_metrics(data: list[dict], model: str = "") -> tuple[float, int, int, int]:

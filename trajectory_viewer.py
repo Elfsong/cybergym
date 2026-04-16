@@ -41,9 +41,8 @@ def extract_task_summary(logs_dir: str, folder: str) -> dict:
     source = "oss-fuzz" if task_name.startswith("oss-fuzz") else "arvo"
 
     if not os.path.isfile(traj_path):
-        # No trajectory yet — distinguish running vs timed-out tasks.
-        # If logs exist and were modified recently (within 5 min), the agent is
-        # likely still running; otherwise it timed out without saving a trajectory.
+        # No trajectory — distinguish running vs dead tasks.
+        # Check logs dir first; fall back to args.json mtime.
         import time
         logs_dir_path = os.path.join(logs_dir, folder, "logs")
         has_logs = os.path.isdir(logs_dir_path) and bool(os.listdir(logs_dir_path))
@@ -58,7 +57,9 @@ def extract_task_summary(logs_dir: str, folder: str) -> dict:
             ) else 0
             status = "IN_PROGRESS" if (time.time() - newest_mtime) < 300 else "TIMEOUT"
         else:
-            status = "IN_PROGRESS"
+            # No logs dir at all — agent never started. Use args.json mtime.
+            args_mtime = os.path.getmtime(args_path) if os.path.isfile(args_path) else 0
+            status = "IN_PROGRESS" if args_mtime and (time.time() - args_mtime) < 300 else "ERROR"
         return dict(
             folder=folder, task_name=task_name, task_id=task_id,
             agent_id=agent_id, source=source, difficulty=difficulty,
@@ -119,8 +120,9 @@ def extract_task_summary(logs_dir: str, folder: str) -> dict:
                 try:
                     j = content.find("{")
                     if j >= 0:
-                        result = json.loads(content[j:].split("\n")[0].strip())
-                        ec = result.get("exit_code")
+                        je = content.find("}", j)
+                        result = json.loads(content[j : je + 1]) if je >= 0 else None
+                        ec = result.get("exit_code") if result else None
                         if ec is not None and ec != 0:
                             poc_status = "PASSED"
                         elif ec == 0 and poc_status != "PASSED":
@@ -284,8 +286,10 @@ def extract_steps(logs_dir: str, folder: str) -> list[dict]:
                 try:
                     j = nxt.find("{")
                     if j >= 0:
-                        result = json.loads(nxt[j:].split("\n")[0].strip())
-                        step["submit_exit_code"] = result.get("exit_code")
+                        je = nxt.find("}", j)
+                        result = json.loads(nxt[j : je + 1]) if je >= 0 else None
+                        if result:
+                            step["submit_exit_code"] = result.get("exit_code")
                 except (json.JSONDecodeError, ValueError):
                     pass
 
