@@ -1,5 +1,6 @@
 {
     "_comment": "LLM pricing in USD per million tokens. All scripts read from this file.",
+    "_source": "Tinker API: https://tinker-console.thinkingmachines.ai (2026-04-16)",
     "models": {
         "MiniMax-M2.7": {
             "input": 0.3, "output": 1.2, "cache_read": 0.06, "cache_write": 0.375
@@ -13,68 +14,83 @@
         "MiniMax-M2.5-highspeed": {
             "input": 0.6, "output": 2.4, "cache_read": 0.03, "cache_write": 0.375
         },
-        "Qwen/Qwen3-4B-Instruct-2507": {
-            "input": 0.07, "output": 0.22
-        },
-        "Qwen/Qwen3-8B": {
-            "input": 0.13, "output": 0.40
-        },
-        "Qwen/Qwen3-30B-A3B": {
-            "input": 0.12, "output": 0.30
-        },
-        "Qwen/Qwen3-VL-30B-A3B-Instruct": {
-            "input": 0.18, "output": 0.44
-        },
-        "Qwen/Qwen3-32B": {
-            "input": 0.49, "output": 1.47
-        },
-        "Qwen/Qwen3-235B-Instruct-2507": {
-            "input": 0.68, "output": 1.70
-        },
-        "Qwen/Qwen3-VL-235B-A22B-Instruct": {
-            "input": 1.02, "output": 2.56
-        },
         "Qwen/Qwen3.5-397B-A17B": {
-            "input": 2.00, "output": 5.00
+            "input": 2.00, "output": 5.00, "train": 6.00
+        },
+        "Qwen/Qwen3.5-397B-A17B:peft:262144": {
+            "input": 4.00, "output": 10.00, "train": 12.00
         },
         "Qwen/Qwen3.5-35B-A3B": {
-            "input": 0.36, "output": 0.89
+            "input": 0.36, "output": 0.89, "train": 1.07
         },
         "Qwen/Qwen3.5-27B": {
-            "input": 1.24, "output": 3.73
+            "input": 1.24, "output": 3.73, "train": 3.73
         },
         "Qwen/Qwen3.5-4B": {
-            "input": 0.22, "output": 0.67
+            "input": 0.22, "output": 0.67, "train": 0.67
+        },
+        "Qwen/Qwen3-4B-Instruct-2507": {
+            "input": 0.07, "output": 0.22, "train": 0.22
+        },
+        "Qwen/Qwen3-8B": {
+            "input": 0.13, "output": 0.40, "train": 0.40
+        },
+        "Qwen/Qwen3-30B-A3B": {
+            "input": 0.12, "output": 0.30, "train": 0.36
+        },
+        "Qwen/Qwen3-VL-30B-A3B-Instruct": {
+            "input": 0.18, "output": 0.44, "train": 0.53
+        },
+        "Qwen/Qwen3-32B": {
+            "input": 0.49, "output": 1.47, "train": 1.47
+        },
+        "Qwen/Qwen3-235B-Instruct-2507": {
+            "input": 0.68, "output": 1.70, "train": 2.04
+        },
+        "Qwen/Qwen3-VL-235B-A22B-Instruct": {
+            "input": 1.02, "output": 2.56, "train": 3.07
         },
         "meta-llama/Llama-3.2-1B": {
-            "input": 0.03, "output": 0.09
+            "input": 0.03, "output": 0.09, "train": 0.09
         },
         "meta-llama/Llama-3.2-3B": {
-            "input": 0.06, "output": 0.18
+            "input": 0.06, "output": 0.18, "train": 0.18
         },
         "meta-llama/Llama-3.1-8B": {
-            "input": 0.13, "output": 0.40
+            "input": 0.13, "output": 0.40, "train": 0.40
         },
         "meta-llama/Llama-3.1-70B": {
-            "input": 1.05, "output": 3.16
+            "input": 1.05, "output": 3.16, "train": 3.16
         },
         "deepseek-ai/DeepSeek-V3.1": {
-            "input": 1.13, "output": 2.81
+            "input": 1.13, "output": 2.81, "train": 3.38
         },
         "gpt-oss/GPT-OSS-120B": {
-            "input": 0.18, "output": 0.44
+            "input": 0.18, "output": 0.44, "train": 0.52
+        },
+        "gpt-oss/GPT-OSS-120B:peft:131072": {
+            "input": 0.63, "output": 1.54, "train": 1.82
         },
         "gpt-oss/GPT-OSS-20B": {
-            "input": 0.12, "output": 0.30
+            "input": 0.12, "output": 0.30, "train": 0.36
         },
         "moonshotai/Kimi-K2-Thinking": {
-            "input": 0.98, "output": 2.44
+            "input": 0.98, "output": 2.44, "train": 2.93
         },
         "moonshotai/Kimi-K2.5": {
-            "input": 1.47, "output": 3.66
+            "input": 1.47, "output": 3.66, "train": 4.40
+        },
+        "moonshotai/Kimi-K2.5:peft:131072": {
+            "input": 5.15, "output": 12.81, "train": 15.40
         },
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": {
-            "input": 0.13, "output": 0.33
+            "input": 0.13, "output": 0.33, "train": 0.40
+        },
+        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": {
+            "input": 0.38, "output": 0.96, "train": 1.16
+        },
+        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16:peft:262144": {
+            "input": 0.76, "output": 1.92, "train": 2.32
         }
     }
 }

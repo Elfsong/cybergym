@@ -1,0 +1,282 @@
+[
+  {
+    "task_id": "arvo:33556",
+    "dir": "arvo_33556-ddfdc6da0cde4c44865616160d9c0559",
+    "steps": 50,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:10841",
+    "dir": "arvo_10841-02f45c619dca4a80ab2cacd09f53c9c4",
+    "steps": 50,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:46541",
+    "dir": "arvo_46541-79c0d2be75c54acc8c9e34b990ddce54",
+    "steps": 54,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:49903",
+    "dir": "arvo_49903-aca6c1946d3d45c3b67570fd1dd30478",
+    "steps": 54,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:1348",
+    "dir": "arvo_1348-ff7f441d12dd4b478cd5cedd457f35c3",
+    "steps": 54,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:23778",
+    "dir": "arvo_23778-aa5323d847154d8baa193060df35d512",
+    "steps": 56,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:8903",
+    "dir": "arvo_8903-573cba7abc6244a995c28cd767a7b9bf",
+    "steps": 56,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:21301",
+    "dir": "arvo_21301-46fd4247a8bd432d8f88aa0ea490a9b7",
+    "steps": 58,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:56179",
+    "dir": "arvo_56179-8eb7c80a67b64c70a4ff8efb39d91177",
+    "steps": 59,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:45568",
+    "dir": "arvo_45568-8267d11ff55745daa9fa281985c602a5",
+    "steps": 60,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:20200",
+    "dir": "arvo_20200-c1fa359ca73e4bf0b50235cd1561cf33",
+    "steps": 60,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:8511",
+    "dir": "arvo_8511-cb2636a1fd204b8cb34a80bf41bfc782",
+    "steps": 61,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:19463",
+    "dir": "arvo_19463-106ba821260a40f08da2c309e03978f2",
+    "steps": 62,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "oss-fuzz:42538001",
+    "dir": "oss-fuzz_42538001-8435040185b84c1790cf9bbcca08d044",
+    "steps": 64,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:38307",
+    "dir": "arvo_38307-1383c3c6b80a4950a5786cf3426a9ab3",
+    "steps": 65,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:14767",
+    "dir": "arvo_14767-720eba5ae9e4492588343d13336ada2f",
+    "steps": 66,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "oss-fuzz:42535637",
+    "dir": "oss-fuzz_42535637-54f979e87e324814af3631f61348bb89",
+    "steps": 67,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:28462",
+    "dir": "arvo_28462-f7d18d4a883b4a43b0d2f930c29683b0",
+    "steps": 67,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:45320",
+    "dir": "arvo_45320-420ff1da395240df9213e1f5eff02fac",
+    "steps": 70,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "arvo:21302",
+    "dir": "arvo_21302-ba265890b5af48299836a3abb1ae6ced",
+    "steps": 73,
+    "source": "qwen",
+    "group": "A_self_oracle"
+  },
+  {
+    "task_id": "oss-fuzz:42536068",
+    "dir": "oss-fuzz_42536068-3c8e0eed52dc41c9a29db356662fdf1a",
+    "steps": 100,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "arvo:19405",
+    "dir": "arvo_19405-e299bda2dcfa478e8ae1b29553d5c965",
+    "steps": 100,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "arvo:60262",
+    "dir": "arvo_60262-4b3291f0f81c484987b60694b1bda3b4",
+    "steps": 101,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "arvo:50589",
+    "dir": "arvo_50589-eba5b22ca6d14c45b3d7461e34f06ef5",
+    "steps": 106,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "arvo:30236",
+    "dir": "arvo_30236-20be5a5bd19a42e394355e44234515f6",
+    "steps": 106,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "arvo:22560",
+    "dir": "arvo_22560-95ed5cd590d041699c1f89e94cdd7679",
+    "steps": 107,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "arvo:22244",
+    "dir": "arvo_22244-0a125fe62eb8488b944016cc4c79bb35",
+    "steps": 109,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "arvo:12195",
+    "dir": "arvo_12195-1b1f0f52789b449ab250cd065ba44ccb",
+    "steps": 118,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "arvo:51757",
+    "dir": "arvo_51757-417a85dd87f5496ca62bdaf1c1082348",
+    "steps": 126,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "arvo:62388",
+    "dir": "arvo_62388-ccef0d92ad814d78ba15e7055262ab2f",
+    "steps": 128,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "arvo:7350",
+    "dir": "arvo_7350-70df29d3cfcb49c99852d52374d2e09a",
+    "steps": 132,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "arvo:59576",
+    "dir": "arvo_59576-8f208acc0eb740b69a344a0ad6adac0a",
+    "steps": 132,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "oss-fuzz:42537788",
+    "dir": "oss-fuzz_42537788-029e4184fcab4b439772b3e83399b13d",
+    "steps": 135,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "arvo:55413",
+    "dir": "arvo_55413-0f1ed718a47a4c1883d33c3b7015b842",
+    "steps": 137,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "arvo:28064",
+    "dir": "arvo_28064-bff40dbf16494d91baf38339d400b01c",
+    "steps": 137,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "arvo:36497",
+    "dir": "arvo_36497-876f42e4b2464fbd9e9838feb0249bce",
+    "steps": 138,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "arvo:56513",
+    "dir": "arvo_56513-8f6277c2c81e4249a3d7891ab27a6b3f",
+    "steps": 142,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "oss-fuzz:42537861",
+    "dir": "oss-fuzz_42537861-e0d4c6dfd7fa4e78ad29ceec1c6b32b2",
+    "steps": 144,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "oss-fuzz:42537769",
+    "dir": "oss-fuzz_42537769-a5a87083e1e848c5b1afd84c4d001116",
+    "steps": 145,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  },
+  {
+    "task_id": "oss-fuzz:42537734",
+    "dir": "oss-fuzz_42537734-e572d7658833430e9f28fca2bea3d0ca",
+    "steps": 145,
+    "source": "minimax",
+    "group": "B_cross_oracle"
+  }
+]

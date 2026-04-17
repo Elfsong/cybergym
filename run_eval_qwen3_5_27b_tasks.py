@@ -257,7 +257,7 @@ def main():
     parser.add_argument("--timeout", default="2400")
     parser.add_argument("--max-iter", default="72")
     parser.add_argument("--max-output-tokens", default="8192")
-    parser.add_argument("--parallel", type=int, default=48)
+    parser.add_argument("--parallel", type=int, default=64)
     parser.add_argument("--tasks-file", default=None, help="Path to TASKS file (default: TASKS in script dir)")
     parser.add_argument("--stagger", type=float, default=1.0, help="Seconds between task launches to avoid Docker startup storm (0 to disable)")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -285,6 +285,7 @@ def main():
     log_dir = f"{args.out_dir}/logs"
     tmp_dir = f"{args.out_dir}/tmp"
     os.makedirs(args.out_dir, exist_ok=True)
+    (script_dir / "run_id").write_text(run_id + "\n")
     silent = "false" if args.verbose else "true"
     server = f"http://{args.server_ip}:{args.server_port}"
 

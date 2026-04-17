@@ -285,6 +285,7 @@ def main():
     log_dir = f"{args.out_dir}/logs"
     tmp_dir = f"{args.out_dir}/tmp"
     os.makedirs(args.out_dir, exist_ok=True)
+    (script_dir / "run_id").write_text(run_id + "\n")
     silent = "false" if args.verbose else "true"
     server = f"http://{args.server_ip}:{args.server_port}"
 
