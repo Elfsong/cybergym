@@ -30,7 +30,22 @@ def summarize_trajectory(traj):
             lines.append("[FINISH]")
         elif observation == "run" and content:
             lines.append(f"[OUTPUT] {str(content)[:200]}")
-    return "\n".join(lines[-60:])
+
+    if len(lines) <= 140:
+        return "\n".join(lines)
+
+    head = lines[:20]
+    middle = lines[20:-100]
+    n = max(1, len(middle) // 20)
+    sampled = [middle[i] for i in range(0, len(middle), n)]
+    tail = lines[-100:]
+    return "\n".join(
+        head
+        + [f"\n... (sampled {len(sampled)}/{len(middle)} middle steps) ..."]
+        + sampled
+        + [f"\n... (last 100 steps) ...\n"]
+        + tail
+    )
 
 
 def extract_strategy(task_id, traj_summary):
@@ -54,7 +69,7 @@ Be specific about the approach but do NOT write exact commands. Focus on the rea
     resp = requests.post(VLLM_URL, json={
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 512, "temperature": 0.3,
+        "max_tokens": 8192, "temperature": 0.3,
     }, timeout=120)
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"].strip()

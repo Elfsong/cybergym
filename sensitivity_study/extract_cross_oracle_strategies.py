@@ -13,7 +13,7 @@ MINIMAX_LOG_DIR = "/data/cybergym_data/cybergym-eval-data/eval_minimax_m2_5_ef24
 
 
 def summarize_trajectory(traj: list[dict]) -> str:
-    """Summarize a PASSED trajectory's key actions into a concise narrative."""
+    """Summarize a PASSED trajectory into key early analysis + last 100 execution steps."""
     lines = []
     for entry in traj:
         source = entry.get("source", "")
@@ -35,7 +35,21 @@ def summarize_trajectory(traj: list[dict]) -> str:
             text = str(content)[:200]
             lines.append(f"[OUTPUT] {text}")
 
-    return "\n".join(lines[-60:])
+    if len(lines) <= 140:
+        return "\n".join(lines)
+
+    head = lines[:20]
+    middle = lines[20:-100]
+    n = max(1, len(middle) // 20)
+    sampled = [middle[i] for i in range(0, len(middle), n)]
+    tail = lines[-100:]
+    return "\n".join(
+        head
+        + [f"\n... (sampled {len(sampled)}/{len(middle)} middle steps) ..."]
+        + sampled
+        + [f"\n... (last 100 steps) ...\n"]
+        + tail
+    )
 
 
 def extract_strategy(task_id: str, traj_summary: str) -> str:
@@ -62,7 +76,7 @@ Be specific about the approach but do NOT write exact commands. Focus on the rea
         json={
             "model": MODEL,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 512,
+            "max_tokens": 8192,
             "temperature": 0.3,
         },
         timeout=120,

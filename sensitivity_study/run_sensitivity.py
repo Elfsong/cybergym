@@ -59,9 +59,10 @@ Run `bash /workspace/submit.sh /path/to/your/poc_file` to test your PoC.
 
 
 def load_strategies():
-    """Load oracle and adversarial strategies."""
+    """Load oracle, adversarial, and zero-shot strategies."""
     oracle_path = SCRIPT_DIR / "oracle_strategies.json"
     adversarial_path = SCRIPT_DIR / "adversarial_strategies.json"
+    zeroshot_path = SCRIPT_DIR / "zeroshot_strategies_100.json"
     tasks_path = PROJECT_DIR / "sensitivity_tasks.json"
 
     with open(tasks_path) as f:
@@ -77,16 +78,20 @@ def load_strategies():
         if o.get("strategy"):
             oracle_map[o["task_id"]] = o["strategy"]
 
-    return tasks, oracle_map, adversarials
+    # Build zero-shot map: task_id -> strategy
+    zeroshot_map = {}
+    if zeroshot_path.exists():
+        with open(zeroshot_path) as f:
+            for z in json.load(f):
+                if z.get("strategy"):
+                    zeroshot_map[z["task_id"]] = z["strategy"]
+
+    return tasks, oracle_map, adversarials, zeroshot_map
 
 
-def build_conditions(tasks, oracle_map, adversarials):
-    """Build the full experiment matrix: 40 tasks × 4 conditions."""
+def build_conditions(tasks, oracle_map, adversarials, zeroshot_map):
+    """Build the full experiment matrix: N tasks × 5 conditions."""
     conditions = []
-    task_ids = [t["task_id"] for t in tasks]
-
-    # Collect all oracle strategies for random assignment
-    all_strategies = list(oracle_map.values())
 
     for task in tasks:
         tid = task["task_id"]
@@ -126,6 +131,15 @@ def build_conditions(tasks, oracle_map, adversarials):
             "group": group,
             "prompt": STRATEGY_PROMPT_TEMPLATE.format(strategy=random.choice(adversarials)),
         })
+
+        # (e) Zero-shot: untrained planner strategy
+        if tid in zeroshot_map:
+            conditions.append({
+                "task_id": tid,
+                "condition": "zeroshot",
+                "group": group,
+                "prompt": STRATEGY_PROMPT_TEMPLATE.format(strategy=zeroshot_map[tid]),
+            })
 
     return conditions
 
@@ -273,8 +287,8 @@ def main():
     random.seed(args.seed)
 
     # Load strategies
-    tasks, oracle_map, adversarials = load_strategies()
-    conditions = build_conditions(tasks, oracle_map, adversarials)
+    tasks, oracle_map, adversarials, zeroshot_map = load_strategies()
+    conditions = build_conditions(tasks, oracle_map, adversarials, zeroshot_map)
 
     # Filter out oracle conditions for tasks without extracted strategy
     conditions = [c for c in conditions if not (c["condition"] == "oracle" and c["prompt"] is None)]
@@ -289,10 +303,9 @@ def main():
 
     print(f"Strategy Sensitivity Study")
     print(f"  Tasks: {len(tasks)}")
-    print(f"  Conditions: {len(conditions)} total ({len([c for c in conditions if c['condition']=='oracle'])} oracle, "
-          f"{len([c for c in conditions if c['condition']=='no_strategy'])} no_strategy, "
-          f"{len([c for c in conditions if c['condition']=='random'])} random, "
-          f"{len([c for c in conditions if c['condition']=='adversarial'])} adversarial)")
+    cond_counts = {cn: len([c for c in conditions if c["condition"] == cn])
+                   for cn in ["oracle", "no_strategy", "random", "adversarial", "zeroshot"]}
+    print(f"  Conditions: {len(conditions)} total ({', '.join(f'{v} {k}' for k, v in cond_counts.items() if v)})")
     print(f"  Model: {args.model}")
     print(f"  Parallel: {args.parallel}")
     print(f"  Output: {out_dir}")
@@ -347,7 +360,7 @@ def main():
     print("RESULTS SUMMARY")
     print("=" * 60)
 
-    for condition in ["oracle", "no_strategy", "random", "adversarial"]:
+    for condition in ["oracle", "no_strategy", "random", "adversarial", "zeroshot"]:
         cond_results = [r for r in results if r["condition"] == condition]
         if not cond_results:
             continue
@@ -371,7 +384,7 @@ def main():
     print("-" * 60)
     for group in ["A_self_oracle", "B_cross_oracle"]:
         print(f"\n  {group}:")
-        for condition in ["oracle", "no_strategy", "random", "adversarial"]:
+        for condition in ["oracle", "no_strategy", "random", "adversarial", "zeroshot"]:
             cr = [r for r in results if r.get("group") == group and r["condition"] == condition]
             if not cr:
                 continue
