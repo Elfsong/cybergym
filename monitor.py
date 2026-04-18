@@ -942,9 +942,9 @@ def main():
     project_dir = Path(__file__).parent
 
     # Get task list
-    tasks_path = Path(args.tasks) if args.tasks else project_dir / "TASKS"
+    tasks_path = Path(args.tasks) if args.tasks else project_dir / "TASKS_TRAIN"
     if not tasks_path.exists():
-        print(f"TASKS file not found: {tasks_path}")
+        print(f"TASKS_TRAIN file not found: {tasks_path}")
         sys.exit(1)
 
     task_list = parse_task_list_from_file(tasks_path)

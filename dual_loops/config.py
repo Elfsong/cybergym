@@ -72,7 +72,7 @@ class Config:
     # --- Paths ---
     data_dir: Path = Path("/data/cybergym_data/cybergym-benchmark-data/data")
     train_root: Path = Path("/data/cybergym_data/cybergym-train-data")
-    tasks_file: Path = PROJECT_DIR / "TASKS"
+    tasks_file: Path = PROJECT_DIR / "TASKS_TRAIN"
     server: str = "http://172.17.0.1:8666"
     cybergym_api_key: str = field(default_factory=lambda: os.getenv(
         "CYBERGYM_API_KEY", "cybergym-030a0cd7-5908-4862-8ab9-91f2bfc7b56d"

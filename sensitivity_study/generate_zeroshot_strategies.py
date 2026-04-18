@@ -105,7 +105,7 @@ async def main_async(tasks: list[str], data_dir: Path, concurrency: int, max_tok
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--tasks-file", default=str(PROJECT_DIR / "TASKS"))
+    parser.add_argument("--tasks-file", default=str(PROJECT_DIR / "TASKS_TRAIN"))
     parser.add_argument("--data-dir", default="/data/cybergym_data/cybergym-benchmark-data/data")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--concurrency", type=int, default=16)

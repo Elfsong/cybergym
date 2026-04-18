@@ -338,9 +338,9 @@ def main():
     args.out_dir = f"{args.out_dir}_{run_id}"
 
     # Task list
-    tasks_file = args.tasks_file or str(SCRIPT_DIR / "TASKS")
+    tasks_file = args.tasks_file or str(SCRIPT_DIR / "TASKS_TRAIN")
     if not Path(tasks_file).exists():
-        print(f"Error: TASKS file not found: {tasks_file}", file=sys.stderr)
+        print(f"Error: TASKS_TRAIN file not found: {tasks_file}", file=sys.stderr)
         sys.exit(1)
     tasks = parse_tasks_file(tasks_file)
     if not tasks:
@@ -357,7 +357,6 @@ def main():
     log_dir = f"{args.out_dir}/logs"
     tmp_dir = f"{args.out_dir}/tmp"
     os.makedirs(args.out_dir, exist_ok=True)
-    (SCRIPT_DIR / "run_id.txt").write_text(run_id + "\n")
 
     prompt_file = str(PROMPT_PATH)
     server = f"http://{args.server_ip}:{args.server_port}"
