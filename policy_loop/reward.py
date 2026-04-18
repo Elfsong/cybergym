@@ -409,13 +409,28 @@ def detect_milestone(
 def compute_reward(
     milestone: int,
     adherence: float = 1.0,
-    novelty: float = 0.0,
     lambda_adherence: float = 0.0,
-    alpha_novelty: float = 0.0,
+    thinking_length: int = 0,
+    strategy_length: int = 0,
+    gamma_thinking: float = 0.0,
+    gamma_strategy: float = 0.0,
+    thinking_ref_tokens: int = 3000,
+    strategy_ref_tokens: int = 500,
 ) -> float:
-    """Composite reward:  r = a * r_milestone + λ * a + α * novelty.
+    """Composite reward:
+        r = a · r_milestone + λ · a + γ_t · f_think + γ_s · f_strat
 
-    Phase 1 default: lambda=alpha=0 → just milestone reward.
+    where f_think = min(thinking_length / thinking_ref, 1) and likewise for f_strat.
+    Both length terms saturate at 1.0 so very long thinking doesn't dominate the reward.
+
+    All γ, λ default to 0 → reduces to flat milestone reward (Phase 1 behavior).
     """
     r_mile = MILESTONE_REWARDS[milestone]
-    return adherence * r_mile + lambda_adherence * adherence + alpha_novelty * novelty
+    f_think = min(thinking_length / max(thinking_ref_tokens, 1), 1.0)
+    f_strat = min(strategy_length / max(strategy_ref_tokens, 1), 1.0)
+    return (
+        adherence * r_mile
+        + lambda_adherence * adherence
+        + gamma_thinking * f_think
+        + gamma_strategy * f_strat
+    )

@@ -41,19 +41,37 @@ class Archive:
         n = sum(len(v) for v in self._index.values())
         logger.info(f"Archive loaded: {n} records across {len(self._index)} tasks")
 
-    def append(self, strategy: str, milestone: int, task_id: str) -> None:
-        """Add a new (strategy, milestone) pair for this task."""
-        rec = {"task_id": task_id, "strategy": strategy, "milestone": milestone}
-        self._index[task_id].append(rec)
+    # v2+ optional fields (backward compatible — records missing these are fine)
+    _V2_FIELDS = (
+        "round", "group_id", "adherence", "insight",
+        "n_thinking_tokens", "n_strategy_tokens",
+        "trajectory_path", "run_id", "timestamp",
+    )
+
+    def append(self, record: dict) -> None:
+        """Add one record. Required: task_id, strategy, milestone.
+        Optional v2 fields: round, group_id, adherence, trajectory_path,
+        run_id, timestamp (pass-through to JSONL).
+        """
+        rec: dict = {
+            "task_id":   record["task_id"],
+            "strategy":  record["strategy"],
+            "milestone": record["milestone"],
+        }
+        for k in self._V2_FIELDS:
+            if k in record:
+                rec[k] = record[k]
+        self._index[rec["task_id"]].append(rec)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "a") as f:
             f.write(json.dumps(rec))
             f.write("\n")
 
     def append_batch(self, records: list[dict]) -> None:
-        """Batch append; records = [{"task_id", "strategy", "milestone"}, ...]"""
+        """Batch append; each record must have task_id/strategy/milestone plus
+        any optional v2 fields."""
         for r in records:
-            self.append(r["strategy"], r["milestone"], r["task_id"])
+            self.append(r)
 
     def retrieve(
         self,

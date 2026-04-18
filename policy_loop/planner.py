@@ -21,12 +21,14 @@ try:
     import tinker
     import torch
     from tinker import TensorData
+    from tinker_cookbook import model_info
     from tinker_cookbook.renderers import get_renderer, get_text_content
     TINKER_AVAILABLE = True
 except ImportError:
     TINKER_AVAILABLE = False
     tinker = None  # type: ignore
     torch = None  # type: ignore
+    model_info = None  # type: ignore
 
 from .config import Config
 from .prompts import PLANNER_SYSTEM_PROMPT, PLANNER_USER_TEMPLATE, format_archive_block
@@ -43,7 +45,11 @@ class Task:
     """One CyberGym task with the vulnerability description."""
     task_id: str
     description: str
-    # Optional: retrieved prior strategies for this task (Phase 2 archive)
+    # Legacy field — no longer populated by build_tasks. Retrieval has moved
+    # into generate_strategies (one draw per sample, not once per task) so
+    # that each of the K prompts for this task sees a different subset of
+    # priors. Kept on the dataclass only for forward-compat with any code
+    # still reading the attribute.
     prior_strategies: list[tuple[str, int]] = field(default_factory=list)
 
 
@@ -56,12 +62,60 @@ class StrategyToExecute:
     the Datum model_input for GRPO (see demo.py).
     """
     task_id: str
-    strategy: str                     # decoded text
-    tokens: list[int]                 # strategy token IDs (for Datum)
-    logprobs: list[float]             # per-token log-probabilities under sampling policy
+    strategy: str                     # decoded text (thinking stripped for executor)
+    thinking: str = ""                # thinking content (preserved for analysis)
+    tokens: list[int] = field(default_factory=list)  # full token IDs including thinking (for Datum)
+    logprobs: list[float] = field(default_factory=list)  # per-token log-probabilities under sampling policy
     prompt: object = None             # Tinker ModelInput (keep original, not just tokens)
     prompt_length: int = 0            # cached prompt.length for convenience
     group_id: int = 0                 # index within the K-group (0..K-1)
+    n_thinking_tokens: int = 0        # token-level length of the thinking span (pre-</think>)
+    n_strategy_tokens: int = 0        # token-level length of the strategy span (post-</think>)
+    priors_shown: list = field(default_factory=list)  # list[(prior_strategy_text, milestone)] shown in this sample's prompt
+
+
+def _split_thinking(text: str) -> tuple[str, str]:
+    """Split thinking content from strategy. Returns (strategy, thinking)."""
+    marker = "</think>"
+    idx = text.find(marker)
+    if idx >= 0:
+        thinking = text[:idx].strip()
+        strategy = text[idx + len(marker):].strip()
+        return strategy, thinking
+    # No </think> tag — check for "Thinking Process:" plain-text pattern
+    # (fallback for truncated outputs that never reached </think>)
+    return text, ""
+
+
+def _find_subsequence(tokens: list[int], needle: list[int]) -> int:
+    """Return start index of `needle` in `tokens`, or -1 if not found.
+    O(N*M) linear search; N is at most max_strategy_tokens (16k) and M is 2-3.
+    """
+    if not needle or len(needle) > len(tokens):
+        return -1
+    for i in range(len(tokens) - len(needle) + 1):
+        if tokens[i : i + len(needle)] == needle:
+            return i
+    return -1
+
+
+def _split_token_spans(
+    tokens: list[int],
+    close_think_tokens: list[int] | None,
+) -> tuple[int, int]:
+    """Return (n_thinking_tokens, n_strategy_tokens) from a full response token list.
+
+    If </think> is not present (either thinking mode disabled or the sequence was
+    truncated before emitting it), everything counts as strategy.
+    """
+    if not close_think_tokens:
+        return 0, len(tokens)
+    idx = _find_subsequence(tokens, close_think_tokens)
+    if idx < 0:
+        return 0, len(tokens)
+    n_think = idx
+    n_strat = len(tokens) - idx - len(close_think_tokens)
+    return n_think, max(n_strat, 0)
 
 
 # ==========================================================================
@@ -83,10 +137,19 @@ class Planner:
         self.renderer = None
         self.sampling_params = None
         self.adam_params = None
+        self.archive = None                # bound by run_round when archive_enabled
+
+    def bind_archive(self, archive) -> None:
+        """Attach an Archive instance so generate_strategies can do per-sample
+        tournament draws. Pass None (or leave unset) to disable archive retrieval."""
+        self.archive = archive
 
     async def init(self) -> None:
         """Create the Tinker LoRA training client and renderers."""
-        self.service_client = tinker.ServiceClient()
+        kwargs = {}
+        if self.config.tinker_api_key:
+            kwargs["api_key"] = self.config.tinker_api_key
+        self.service_client = tinker.ServiceClient(**kwargs)
         self.training_client = (
             await self.service_client.create_lora_training_client_async(
                 base_model=self.config.tinker_model,
@@ -94,7 +157,14 @@ class Planner:
             )
         )
         self.tokenizer = self.training_client.get_tokenizer()
-        self.renderer = get_renderer("qwen3", self.tokenizer)
+        renderer_name = model_info.get_recommended_renderer_name(self.config.tinker_model)
+        self.renderer = get_renderer(renderer_name, self.tokenizer)
+        # Pre-tokenize </think> marker for O(1) lookup during generation
+        try:
+            self._close_think_tokens = self.tokenizer.encode("</think>", add_special_tokens=False)
+        except TypeError:
+            # tokenizer may not accept add_special_tokens; fall back
+            self._close_think_tokens = self.tokenizer.encode("</think>")
         self.sampling_params = tinker.SamplingParams(
             max_tokens=self.config.max_strategy_tokens,
             temperature=self.config.strategy_temperature,
@@ -110,9 +180,10 @@ class Planner:
             f"Planner ready: {self.config.tinker_model} LoRA rank={self.config.tinker_rank}"
         )
 
-    def _build_planner_prompt(self, task: Task):
-        """Build the chat-formatted prompt for one task. Returns the Tinker ModelInput."""
-        archive_block = format_archive_block(task.prior_strategies)
+    def _build_planner_prompt(self, task: Task, priors: list[tuple[str, int]]):
+        """Build the chat-formatted prompt for one (task, priors) pair.
+        Returns the Tinker ModelInput."""
+        archive_block = format_archive_block(priors)
         user_content = PLANNER_USER_TEMPLATE.format(
             task_id=task.task_id,
             description=task.description,
@@ -124,11 +195,30 @@ class Planner:
         ]
         return self.renderer.build_generation_prompt(convo)
 
+    def _retrieve_priors_for_sample(self, task_id: str) -> list[tuple[str, int]]:
+        """One tournament draw per call (RNG on the Archive produces different
+        subsets across calls). Returns [] when the archive is not bound/enabled."""
+        if self.archive is None or not self.config.archive_enabled:
+            return []
+        return self.archive.retrieve(
+            task_id,
+            n=self.config.archive_n,
+            tournament_size=self.config.archive_tournament_size,
+            min_milestone=self.config.archive_min_milestone,
+        )
+
     async def generate_strategies(
         self,
         tasks: list[Task],
     ) -> list[StrategyToExecute]:
-        """Generate K strategies per task (all in parallel). Returns K*N strategies."""
+        """Generate K strategies per task with per-sample tournament retrieval.
+
+        For every (task, k) pair we draw an independent tournament from the
+        archive and build a distinct prompt, then dispatch N·K `num_samples=1`
+        sampling calls in parallel. When the archive is empty or disabled,
+        every draw returns [], so all K prompts for a task are identical and
+        the behavior reduces to the previous `num_samples=K` form.
+        """
         K = self.config.group_size
         assert self.training_client is not None and self.renderer is not None
 
@@ -137,68 +227,99 @@ class Planner:
             await self.training_client.save_weights_and_get_sampling_client_async()
         )
 
-        # Build prompts and sample concurrently
-        prompts = [self._build_planner_prompt(t) for t in tasks]
+        # One job per (task, group_id) — independent retrieve + independent prompt
+        jobs: list[tuple[Task, int, object, list]] = []
+        for task in tasks:
+            for g in range(K):
+                priors = self._retrieve_priors_for_sample(task.task_id)
+                prompt = self._build_planner_prompt(task, priors)
+                jobs.append((task, g, prompt, priors))
+
         coros = [
             sampling_client.sample_async(
                 prompt=prompt,
-                num_samples=K,
+                num_samples=1,
                 sampling_params=self.sampling_params,
             )
-            for prompt in prompts
+            for _, _, prompt, _ in jobs
         ]
         sample_results = await asyncio.gather(*coros)
 
         strategies: list[StrategyToExecute] = []
-        for task, prompt, sample_result in zip(tasks, prompts, sample_results):
-            for g, seq in enumerate(sample_result.sequences):
-                if not seq.tokens:
-                    continue
-                # Decode the strategy text from the response tokens
-                try:
-                    parsed_msg, _ = self.renderer.parse_response(seq.tokens)
-                    text = get_text_content(parsed_msg) or ""
-                except Exception as e:
-                    logger.warning(f"Failed to parse sample tokens for {task.task_id}: {e}")
-                    text = self.tokenizer.decode(seq.tokens)
+        for (task, g, prompt, priors), sample_result in zip(jobs, sample_results):
+            if not sample_result.sequences:
+                continue
+            seq = sample_result.sequences[0]
+            if not seq.tokens:
+                continue
+            try:
+                parsed_msg, _ = self.renderer.parse_response(seq.tokens)
+                full_text = get_text_content(parsed_msg) or ""
+            except Exception as e:
+                logger.warning(f"Failed to parse sample tokens for {task.task_id}: {e}")
+                full_text = self.tokenizer.decode(seq.tokens)
 
-                strategies.append(StrategyToExecute(
-                    task_id=task.task_id,
-                    strategy=text,
-                    tokens=list(seq.tokens),
-                    logprobs=list(seq.logprobs),
-                    prompt=prompt,                    # keep original ModelInput
-                    prompt_length=prompt.length,
-                    group_id=g,
-                ))
-        logger.info(
-            f"Generated {len(strategies)} strategies across {len(tasks)} tasks (K={K})"
-        )
+            strategy, thinking = _split_thinking(full_text)
+            n_think, n_strat = _split_token_spans(
+                list(seq.tokens), getattr(self, "_close_think_tokens", None),
+            )
+
+            strategies.append(StrategyToExecute(
+                task_id=task.task_id,
+                strategy=strategy,
+                thinking=thinking,
+                tokens=list(seq.tokens),
+                logprobs=list(seq.logprobs),
+                prompt=prompt,
+                prompt_length=prompt.length,
+                group_id=g,
+                n_thinking_tokens=n_think,
+                n_strategy_tokens=n_strat,
+                priors_shown=priors,
+            ))
+
+        # Diagnostic: how many distinct prior-sets were shown across K samples for a task?
+        # (Sanity check that the per-sample draw actually produces variety.)
+        from collections import defaultdict
+        by_task_hashes: dict[str, set] = defaultdict(set)
+        for s in strategies:
+            by_task_hashes[s.task_id].add(tuple((t, m) for t, m in s.priors_shown))
+        distinct_per_task = [len(v) for v in by_task_hashes.values()]
+        if distinct_per_task:
+            mean_distinct = sum(distinct_per_task) / len(distinct_per_task)
+            logger.info(
+                f"Generated {len(strategies)} strategies across {len(tasks)} tasks (K={K}); "
+                f"mean distinct prior-sets per task = {mean_distinct:.2f} / {K}"
+            )
+        else:
+            logger.info(
+                f"Generated {len(strategies)} strategies across {len(tasks)} tasks (K={K})"
+            )
         return strategies
 
-    async def grpo_update(
+    def _build_task_datums(
         self,
         strategies_with_rewards: list[tuple[StrategyToExecute, float]],
-        eps: float = 1e-8,
-    ) -> dict:
-        """Compute GRPO advantages per-task-group, build Datums, do gradient step.
+        eps: float,
+    ) -> tuple[dict[str, list], dict]:
+        """Compute per-task GRPO advantages and build datums grouped by task_id.
 
-        Returns metrics: {used, degenerate, total_groups, frac_degenerate, mean_reward}.
+        Returns (task_datums, summary) where
+          task_datums maps task_id -> list[tinker.Datum]  (degenerate groups omitted)
+          summary has {used, degenerate, total_groups, frac_degenerate, mean_reward}.
         """
         from collections import defaultdict
 
-        assert self.training_client is not None and self.adam_params is not None
-
-        # Group by task_id
         groups: dict[str, list[tuple[StrategyToExecute, float]]] = defaultdict(list)
         for strat, reward in strategies_with_rewards:
             groups[strat.task_id].append((strat, reward))
 
-        datums: list = []
+        task_datums: dict[str, list] = {}
         n_degenerate = 0
         n_used = 0
         rewards_all: list[float] = []
-        for _tid, group in groups.items():
+
+        for tid, group in groups.items():
             rewards = [r for _, r in group]
             rewards_all.extend(rewards)
             mean_r = sum(rewards) / len(rewards)
@@ -210,13 +331,13 @@ class Planner:
                 continue
 
             advantages = [(r - mean_r) / (std_r + eps) for r in rewards]
+            group_datums = []
 
             for (strat, _), adv in zip(group, advantages):
                 if len(strat.tokens) < 2 or strat.prompt is None:
                     continue
 
-                # Build model_input as in demo.py: prompt + strategy[:-1]
-                # (next-token prediction — we predict tokens[1:] from prompt+tokens[:-1])
+                # model_input = prompt + strategy[:-1] (next-token prediction setup)
                 model_input = strat.prompt.append(
                     tinker.EncodedTextChunk(tokens=list(strat.tokens[:-1]))
                 )
@@ -234,32 +355,125 @@ class Planner:
                         "advantages": TensorData.from_torch(torch.tensor(padded_advantages)),
                     },
                 )
-                datums.append(datum)
+                group_datums.append(datum)
                 n_used += 1
 
-        metrics = {
+            if group_datums:
+                task_datums[tid] = group_datums
+
+        summary = {
             "used": n_used,
             "degenerate": n_degenerate,
             "total_groups": len(groups),
             "frac_degenerate": n_degenerate / max(len(groups), 1),
             "mean_reward": sum(rewards_all) / max(len(rewards_all), 1),
         }
+        return task_datums, summary
 
-        if not datums:
+    @staticmethod
+    def _split_task_ids(task_ids: list[str], num_splits: int) -> list[list[str]]:
+        """Split task_ids into `num_splits` approximately equal sublists.
+
+        Sizes differ by at most 1; mirrors tinker_cookbook.utils.misc_utils.split_list.
+        """
+        n = len(task_ids)
+        num_splits = max(1, min(num_splits, n))
+        # Base size + remainder distributed over first `rem` splits
+        base, rem = divmod(n, num_splits)
+        splits: list[list[str]] = []
+        i = 0
+        for s in range(num_splits):
+            size = base + (1 if s < rem else 0)
+            splits.append(task_ids[i : i + size])
+            i += size
+        return splits
+
+    async def grpo_update(
+        self,
+        strategies_with_rewards: list[tuple[StrategyToExecute, float]],
+        *,
+        round_idx: int = 0,
+        eps: float = 1e-8,
+    ) -> dict:
+        """Compute GRPO advantages per-task-group, build Datums, run `num_substeps`
+        pipelined forward_backward + optim_step updates (mini-batch iterative GRPO).
+
+        Each substep uses a disjoint subset of task groups (GRPO groups stay intact
+        within a substep). `num_substeps=1` recovers the single-update behavior.
+
+        Returns summary metrics plus per-substep info.
+        """
+        import random
+        assert self.training_client is not None and self.adam_params is not None
+
+        # 1. Build per-task datums (degenerate groups dropped inside)
+        task_datums, metrics = self._build_task_datums(strategies_with_rewards, eps)
+
+        if not task_datums:
             logger.warning("No datums to train on this round (all groups degenerate)")
+            metrics.update({"num_substeps": 0, "substep_datum_counts": []})
             return metrics
 
-        # Forward-backward + optim step (matches demo.py importance_sampling loss)
+        # 2. Shuffle task_ids deterministically per-round, split into substeps
+        task_ids = list(task_datums.keys())
+        rng = random.Random(42 + round_idx)
+        rng.shuffle(task_ids)
+
+        num_substeps = max(1, self.config.num_substeps)
+        task_splits = self._split_task_ids(task_ids, num_substeps)
+        datum_batches: list[list] = [
+            [d for tid in split for d in task_datums[tid]]
+            for split in task_splits
+        ]
+        # Drop any empty batches (shouldn't happen since task_datums is non-empty)
+        datum_batches = [b for b in datum_batches if b]
+        actual_substeps = len(datum_batches)
+
+        # 3. Pipelined fwd_bwd + optim_step (pattern from tinker_cookbook.rl.train.train_step)
+        substep_metrics: list[dict] = []
+
+        # Enqueue first batch
         fwd_bwd_future = await self.training_client.forward_backward_async(
-            datums, loss_fn="importance_sampling",
+            datum_batches[0], loss_fn="importance_sampling",
         )
         optim_future = await self.training_client.optim_step_async(self.adam_params)
-        await fwd_bwd_future.result_async()
-        await optim_future.result_async()
+
+        for i in range(actual_substeps):
+            # Enqueue next batch before awaiting current (keeps pipeline full)
+            if i + 1 < actual_substeps:
+                next_fwd = await self.training_client.forward_backward_async(
+                    datum_batches[i + 1], loss_fn="importance_sampling",
+                )
+                next_opt = await self.training_client.optim_step_async(self.adam_params)
+            else:
+                next_fwd = None
+                next_opt = None
+
+            # Consume current
+            await fwd_bwd_future.result_async()
+            opt_result = await optim_future.result_async()
+            step_info = {
+                "substep": i,
+                "n_datums": len(datum_batches[i]),
+            }
+            if getattr(opt_result, "metrics", None):
+                step_info["optim_metrics"] = dict(opt_result.metrics)
+            substep_metrics.append(step_info)
+
+            if next_fwd is not None:
+                fwd_bwd_future = next_fwd
+                optim_future = next_opt
+
+        metrics.update({
+            "num_substeps": actual_substeps,
+            "substep_datum_counts": [len(b) for b in datum_batches],
+            "substep_metrics": substep_metrics,
+        })
 
         logger.info(
-            f"GRPO update: used={n_used}, degenerate={n_degenerate}/{len(groups)}, "
-            f"mean_reward={metrics['mean_reward']:.3f}"
+            f"GRPO update: used={metrics['used']}, "
+            f"degenerate={metrics['degenerate']}/{metrics['total_groups']}, "
+            f"substeps={actual_substeps}, mean_reward={metrics['mean_reward']:.3f}"
         )
         return metrics
 
@@ -268,30 +482,61 @@ class Planner:
         ckpt_dir = self.config.checkpoint_dir / f"round_{round_idx:03d}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-        # Tinker: save weights to a path the service can later reload.
-        # The API shape varies; we try common patterns.
+        # Tinker: save_state_async(name, ttl_seconds) persists LoRA weights
+        # on the Tinker service side. Returns a checkpoint reference.
         try:
-            await self.training_client.save_weights_async(str(ckpt_dir / "lora_weights"))
-        except AttributeError:
-            # Older/newer API: save_state_async or similar
-            try:
-                await self.training_client.save_state_async(str(ckpt_dir / "lora_state"))
-            except Exception as e:
-                logger.warning(f"Could not save Tinker weights: {e}")
+            ckpt_name = f"round_{round_idx:03d}"
+            future = await self.training_client.save_state_async(
+                name=ckpt_name, ttl_seconds=604800,  # 7 days
+            )
+            checkpoint = await future.result_async()
+            # SaveWeightsResponse has a .path field (tinker:// URI) used for resume
+            metrics["tinker_checkpoint"] = checkpoint.path
+            logger.info(f"Saved Tinker state: {ckpt_name} → {checkpoint.path}")
+        except Exception as e:
+            logger.warning(f"Could not save Tinker state: {e}")
 
-        # Always save metrics
+        # Always save metrics locally
         metrics_path = ckpt_dir / "metrics.json"
         with open(metrics_path, "w") as f:
             json.dump(metrics, f, indent=2, default=str)
         logger.info(f"Saved checkpoint to {ckpt_dir}")
         return ckpt_dir
 
-    async def load_checkpoint(self, round_idx: int) -> None:
-        """Resume from a previous round's checkpoint."""
+    async def load_checkpoint(self, round_idx: int) -> bool:
+        """Resume from a previous round's checkpoint.
+
+        Reads the tinker_checkpoint path from saved metrics and restores state.
+        Returns True if loaded successfully.
+        """
         ckpt_dir = self.config.checkpoint_dir / f"round_{round_idx:03d}"
-        weights_path = ckpt_dir / "lora_weights"
+        metrics_path = ckpt_dir / "metrics.json"
+        if not metrics_path.exists():
+            logger.warning(f"No metrics at {metrics_path}; cannot resume")
+            return False
         try:
-            await self.training_client.load_weights_async(str(weights_path))
-            logger.info(f"Loaded checkpoint from {ckpt_dir}")
-        except AttributeError:
-            logger.warning("Tinker client has no load_weights_async; skipping resume")
+            with open(metrics_path) as f:
+                metrics = json.load(f)
+            ckpt_ref = metrics.get("tinker_checkpoint")
+            if not ckpt_ref:
+                logger.warning(f"No tinker_checkpoint in {metrics_path}")
+                return False
+            logger.info(f"Resuming from Tinker checkpoint: {ckpt_ref}")
+            # Re-create training client from saved state (async API)
+            self.training_client = await (
+                self.service_client.create_training_client_from_state_with_optimizer_async(
+                    ckpt_ref
+                )
+            )
+            # Rebuild tokenizer + renderer (new training client)
+            self.tokenizer = self.training_client.get_tokenizer()
+            renderer_name = model_info.get_recommended_renderer_name(
+                self.config.tinker_model
+            )
+            from tinker_cookbook.renderers import get_renderer
+            self.renderer = get_renderer(renderer_name, self.tokenizer)
+            logger.info(f"Resumed from round {round_idx} successfully")
+            return True
+        except Exception as e:
+            logger.exception(f"Could not load checkpoint: {e}")
+            return False

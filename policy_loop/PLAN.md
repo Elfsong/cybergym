@@ -37,8 +37,8 @@ policy_loop/
 | **Gradient steps/round** | 1 (grad_accum=4) | On-policy; LoRA updates are small |
 | **Rounds T** | 10 | Paper config; monitor for convergence |
 | **Milestone scoring** | CyberGym server dual-build | `vul_exit!=0 AND fix_exit==0` → milestone 7 exactly |
-| **Reward (v1)** | Just milestone reward | Skip adherence/novelty for Phase 1 |
-| **Reward (v2)** | `a · r_milestone + λ·a + α·novelty` | Add archive retrieval, adherence gate, novelty |
+| **Reward (v1)** | Just milestone reward | Skip adherence for Phase 1 |
+| **Reward (v2)** | `a · r_milestone + λ·a + γ_t·f_think + γ_s·f_strat` | Add archive retrieval + adherence gate (+ optional length signals) |
 
 ## File Details
 
@@ -69,7 +69,8 @@ class Config:
     # Reward (milestone → reward)
     milestone_rewards: tuple = (0.0, 0.5, 1.5, 2.5, 4.0, 5.5, 8.0, 12.0)
     lambda_adherence: float = 0.0   # Phase 1: disabled
-    alpha_novelty: float = 0.0      # Phase 1: disabled
+    gamma_thinking: float = 0.0     # optional length component
+    gamma_strategy: float = 0.0     # optional length component
     
     # Paths
     data_dir: Path = Path("/data/cybergym_data/cybergym-benchmark-data/data")
@@ -247,12 +248,15 @@ def compute_reward(milestone: int, config: Config) -> float:
 
 # Phase 2: composite reward
 def compute_composite_reward(
-    milestone: int, adherence: float, novelty: float, config: Config,
+    milestone: int, adherence: float, n_think: int, n_strat: int, config: Config,
 ) -> float:
     r_mile = config.milestone_rewards[milestone]
+    f_think = min(n_think / config.thinking_ref_tokens, 1.0)
+    f_strat = min(n_strat / config.strategy_ref_tokens, 1.0)
     return (adherence * r_mile
             + config.lambda_adherence * adherence
-            + config.alpha_novelty * novelty)
+            + config.gamma_thinking * f_think
+            + config.gamma_strategy * f_strat)
 
 
 def verify_pocs_on_fix(agent_id, task_id, server, api_key) -> list[int]:
@@ -364,7 +368,7 @@ output/{run_id}/
 
 ## Phase 1 Deliverable
 
-No archive, no adherence, no novelty. Just:
+No archive, no adherence. Just:
 - Generate → Execute → Milestone → GRPO → Checkpoint
 - 2-3 rounds on small batch (10 tasks) to validate pipeline
 - Compare round 0 vs round 2 pass rate

@@ -8,11 +8,13 @@ with --prompt_file to inject the strategy-augmented prompt.
 from __future__ import annotations
 
 import glob
+import json
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -86,6 +88,24 @@ def _recover_trajectory(task_norm: str, agent_id: str, log_dir: Path) -> None:
             json.dump(trajectory, f)
 
 
+def _cleanup_docker_containers(prefix: str = "openhands-runtime-") -> int:
+    """Force-remove any Docker containers matching prefix. Returns count removed."""
+    try:
+        import docker
+        client = docker.from_env()
+        removed = 0
+        for c in client.containers.list(all=True):
+            if c.name.startswith(prefix):
+                try:
+                    c.remove(force=True)
+                    removed += 1
+                except Exception:
+                    pass
+        return removed
+    except Exception:
+        return 0
+
+
 def _run_single(
     idx: int,
     total: int,
@@ -103,10 +123,11 @@ def _run_single(
     task_norm = strategy.task_id.replace(":", "_")
     sub_dir = f"{task_norm}-{agent_id}"
 
-    # Write the strategy-injected prompt to a temp file
+    # Write the strategy-injected prompt to a temp file (under tmp_dir, not /tmp)
     prompt_text = STRATEGY_INJECTION_PROMPT.format(strategy=strategy.strategy)
     prompt_file = tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, prefix=f"strategy_{task_norm}_",
+        dir=str(tmp_dir),
     )
     prompt_file.write(prompt_text)
     prompt_file.close()
@@ -115,6 +136,8 @@ def _run_single(
     start = time.monotonic()
     returncode: int | None = None
 
+    # Use Popen for explicit kill on timeout (subprocess.run doesn't kill children)
+    proc = None
     try:
         cmd = [
             UV_BIN, "run", "python3", str(OPENHANDS_RUN),
@@ -131,22 +154,38 @@ def _run_single(
             "--silent", "true",
             "--difficulty", config.executor_difficulty,
             "--prompt_file", prompt_file.name,
-            # Force a specific agent_id by setting the output sub-dir; OpenHands
-            # generates its own UUID internally, so we rely on _find_trajectory.
         ]
-        proc = subprocess.run(
+        env = {
+            **os.environ,
+            "LLM_API_KEY": os.environ.get("LLM_API_KEY", "EMPTY"),
+            "TMPDIR": str(tmp_dir),  # Force subprocesses to use round tmp, not /tmp
+        }
+        proc = subprocess.Popen(
             cmd,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
-            timeout=config.executor_timeout + 300,
+            stdout=subprocess.DEVNULL,
             cwd=str(PROJECT_DIR),
-            env={**os.environ, "LLM_API_KEY": os.environ.get("LLM_API_KEY", "EMPTY")},
+            env=env,
+            start_new_session=True,  # Own process group for clean kill
         )
+        proc.wait(timeout=config.executor_timeout + 300)
         returncode = proc.returncode
     except subprocess.TimeoutExpired:
-        logger.warning(f"[{idx+1}/{total}] {strategy.task_id} timed out")
+        logger.warning(f"[{idx+1}/{total}] {strategy.task_id} timed out — killing process group")
+        if proc is not None:
+            try:
+                os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL entire group
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.wait(timeout=10)
     except Exception as e:
         logger.warning(f"[{idx+1}/{total}] {strategy.task_id} error: {e}")
+        if proc is not None:
+            try:
+                os.killpg(os.getpgid(proc.pid), 9)
+            except (ProcessLookupError, PermissionError):
+                pass
     finally:
         try:
             os.unlink(prompt_file.name)
@@ -184,6 +223,80 @@ def _run_single(
     return result
 
 
+def _load_exec_checkpoint(
+    ckpt_path: Path,
+    strategies: list[StrategyToExecute],
+    default_log_dir: Path,
+) -> dict[int, ExecutionResult]:
+    """Load previously-completed ExecutionResults keyed by submission index.
+
+    Only entries whose trajectory file still exists on disk are kept; NO_TRAJ
+    or missing-file entries are dropped so they get retried on resume. Entries
+    whose (task_id, group_id) no longer match the current strategies list are
+    also discarded (guards against a stale checkpoint from a different run).
+    """
+    if not ckpt_path.exists():
+        return {}
+    done: dict[int, ExecutionResult] = {}
+    with open(ckpt_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            idx = entry.get("idx")
+            if not isinstance(idx, int) or idx < 0 or idx >= len(strategies):
+                continue
+            traj = entry.get("trajectory_path")
+            if not traj or not Path(traj).exists():
+                continue
+            strat = strategies[idx]
+            if entry.get("task_id") != strat.task_id or entry.get("group_id") != strat.group_id:
+                logger.warning(
+                    f"Checkpoint idx={idx} mismatch "
+                    f"({entry.get('task_id')}:{entry.get('group_id')} vs "
+                    f"{strat.task_id}:{strat.group_id}); discarding"
+                )
+                continue
+            done[idx] = ExecutionResult(
+                strategy=strat,
+                agent_id=entry.get("agent_id", ""),
+                trajectory_path=Path(traj),
+                wall_seconds=entry.get("wall_seconds", 0),
+                subprocess_returncode=entry.get("subprocess_returncode"),
+                log_dir=Path(entry.get("log_dir", str(default_log_dir))),
+            )
+    return done
+
+
+def _append_exec_checkpoint(
+    ckpt_path: Path,
+    idx: int,
+    result: ExecutionResult,
+    lock: threading.Lock,
+) -> None:
+    """Append one completed OK result to the checkpoint jsonl (thread-safe)."""
+    entry = {
+        "idx": idx,
+        "task_id": result.strategy.task_id,
+        "group_id": result.strategy.group_id,
+        "agent_id": result.agent_id,
+        "trajectory_path": str(result.trajectory_path) if result.trajectory_path else None,
+        "wall_seconds": result.wall_seconds,
+        "subprocess_returncode": result.subprocess_returncode,
+        "log_dir": str(result.log_dir),
+    }
+    line = json.dumps(entry) + "\n"
+    with lock:
+        with open(ckpt_path, "a") as f:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
+
+
 def execute_strategies(
     strategies: list[StrategyToExecute],
     config: Config,
@@ -192,27 +305,46 @@ def execute_strategies(
     """Execute all strategies in parallel. Returns results in the same order as input.
 
     Each strategy gets its own workspace (by agent_id) under round_dir/logs.
+    If round_dir/executions.jsonl exists, completed rollouts (with a trajectory
+    file still on disk) are loaded and skipped.
     """
     log_dir = round_dir / "logs"
     tmp_dir = round_dir / "tmp"
     log_dir.mkdir(parents=True, exist_ok=True)
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
+    ckpt_path = round_dir / "executions.jsonl"
+    ckpt_lock = threading.Lock()
+    done = _load_exec_checkpoint(ckpt_path, strategies, log_dir)
+
     results: list[ExecutionResult | None] = [None] * len(strategies)
+    for idx, r in done.items():
+        results[idx] = r
+
+    pending = [i for i in range(len(strategies)) if results[i] is None]
+    if done:
+        logger.info(
+            f"Resuming: {len(done)}/{len(strategies)} rollouts already done, "
+            f"{len(pending)} to execute"
+        )
+    if not pending:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return [r for r in results if r is not None]
+
     with ThreadPoolExecutor(max_workers=config.executor_parallel) as pool:
         futures = {
             pool.submit(
-                _run_single, i, len(strategies), strat, config, log_dir, tmp_dir,
+                _run_single, i, len(strategies), strategies[i], config, log_dir, tmp_dir,
             ): i
-            for i, strat in enumerate(strategies)
+            for i in pending
         }
         for fut in as_completed(futures):
             idx = futures[fut]
             try:
-                results[idx] = fut.result()
+                result = fut.result()
             except Exception as e:
                 logger.exception(f"Strategy {idx} raised: {e}")
-                results[idx] = ExecutionResult(
+                result = ExecutionResult(
                     strategy=strategies[idx],
                     agent_id="",
                     trajectory_path=None,
@@ -220,7 +352,32 @@ def execute_strategies(
                     subprocess_returncode=None,
                     log_dir=log_dir,
                 )
+            results[idx] = result
+            if result.trajectory_path is not None and result.trajectory_path.exists():
+                _append_exec_checkpoint(ckpt_path, idx, result, ckpt_lock)
 
     # Tidy up tmp dir (logs are kept; tmp is transient)
     shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # Force-remove any orphaned OpenHands Docker containers
+    n_orphans = _cleanup_docker_containers()
+    if n_orphans > 0:
+        logger.warning(f"Cleaned up {n_orphans} orphaned Docker containers")
+
+    # Log disk usage for monitoring
+    try:
+        root_usage = shutil.disk_usage("/")
+        data_usage = shutil.disk_usage("/data")
+        tmp_size = sum(
+            f.stat().st_size for f in Path("/tmp").iterdir()
+            if f.is_file() or f.is_symlink()
+        )
+        logger.info(
+            f"Disk: / {root_usage.used/1024**3:.1f}G/{root_usage.total/1024**3:.0f}G, "
+            f"/data {data_usage.used/1024**3:.0f}G/{data_usage.total/1024**3:.0f}G, "
+            f"/tmp ~{tmp_size/1024**2:.0f}MB"
+        )
+    except Exception:
+        pass
+
     return [r for r in results if r is not None]

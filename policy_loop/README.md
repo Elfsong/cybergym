@@ -86,5 +86,5 @@ policy_loop_runs/{run_id}/
 
 ## Phases
 
-**Phase 1**: milestone reward only (`lambda_adherence=0, alpha_novelty=0`, no archive).
-**Phase 2**: add archive retrieval (tournament selection), adherence gate, novelty bonus.
+**Phase 1**: milestone reward only (`lambda_adherence=0`, no archive).
+**Phase 2**: add archive retrieval (tournament selection) and adherence gate.

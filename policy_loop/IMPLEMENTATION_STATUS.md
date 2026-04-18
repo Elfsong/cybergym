@@ -98,4 +98,4 @@ uv run python -m policy_loop.train --num-rounds 10 --batch-size 100 --archive
 1. Install Tinker SDK, verify `planner.py` actually runs (may need minor API adjustments)
 2. Dry-run on 2 tasks to confirm executor + reward pipeline end-to-end
 3. Small training run (3 rounds × 10 tasks) to validate GRPO update
-4. Phase 2: add adherence gate (Haiku judge) + novelty bonus (sentence embeddings)
+4. Phase 2: add archive + reflection judge (adherence + insight) via base Qwen on vLLM
