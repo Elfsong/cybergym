@@ -28,7 +28,7 @@ class Config:
 
     # --- GRPO training ---
     group_size: int = 8
-    batch_size: int = 100            # tasks per round (task groups per round)
+    batch_size: int = 48             # tasks per round (task groups per round)
     mini_batch_size: int = 8         # task groups per GRPO mini-batch.
                                      # Substeps per round are derived: S = ceil(batch_size / mini_batch_size).
     grad_accum: int = 4
@@ -41,7 +41,7 @@ class Config:
     lr_min_ratio: float = 0.1              # cosine floor: min_lr = learning_rate * lr_min_ratio
     lr_warmup_ratio: float = 0.05          # linear warmup over first lr_warmup_ratio * total_steps steps
     kl_beta: float = 0.01                  # reserved (not currently wired into Tinker loss)
-    num_rounds: int = 10
+    num_rounds: int = 12
     max_strategy_tokens: int = 16384
     strategy_temperature: float = 1.0   # higher temp gives intra-group strategy diversity
     strategy_top_p: float = 0.95
