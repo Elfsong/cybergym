@@ -200,7 +200,7 @@ Three checkpoint layers, each guarding a different failure window:
 ### Resume semantics
 
 ```bash
-uv run python -m policy_loop.train \
+uv run python -m dual_loops.train \
   --resume-from /data/cybergym_data/cybergym-train-data/<run_id> \
   <other flags>
 ```
@@ -235,7 +235,7 @@ uv run python -m policy_loop.train \
 on the parent does **not** reach the 64 OpenHands children. To kill cleanly:
 
 ```bash
-pkill -f policy_loop.train           # kills parent + direct children
+pkill -f dual_loops.train            # kills parent + direct children
 pkill -f examples/agents/openhands   # kills orphaned OpenHands subprocs
 docker ps --filter name=openhands-runtime- -q | xargs -r docker rm -f
 ```

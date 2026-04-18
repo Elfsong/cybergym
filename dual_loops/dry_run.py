@@ -4,7 +4,7 @@ This validates the end-to-end pipeline (executor + reward + archive) without
 needing the Tinker SDK installed. Useful for local debugging.
 
 Usage:
-    uv run python -m policy_loop.dry_run
+    uv run python -m dual_loops.dry_run
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from .planner import StrategyToExecute
 from .reward import compute_reward, detect_milestone
 from .utils import get_task_description, setup_logging
 
-logger = logging.getLogger("policy_loop.dry_run")
+logger = logging.getLogger("dual_loops.dry_run")
 
 
 MOCK_STRATEGIES = [

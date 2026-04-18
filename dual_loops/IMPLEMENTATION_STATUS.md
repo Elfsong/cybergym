@@ -7,7 +7,7 @@ Current status (last updated 2026-04-18). See [`PIPELINE.md`](PIPELINE.md) for t
 One integrated training loop; the experience archive and reflection judge are part of the default configuration, not optional add-ons.
 
 ```
-policy_loop/
+dual_loops/
 ├── config.py       — all hyperparameters
 ├── prompts.py      — planner system/user templates + executor strategy injection
 ├── planner.py      — Tinker LoRA client: generate_strategies (per-sample retrieve),
@@ -32,7 +32,7 @@ Reflection judge + archive live under [`experience_loop/`](../experience_loop/) 
 - Milestone detector on 600 existing trajectories (300 Qwen + 300 MiniMax): 0 mismatches against ground-truth PASS/FAIL/NO_SUBMIT labels.
 - Reflection judge on live vLLM: base Qwen3.5-27B emits the expected `<adherence>N</adherence>` and `<insight>...</insight>` tags with max_tokens=8192; parse-failure fallback `(0.0, "")` smoke-tested.
 - Archive v3 schema roundtrip: records with `insight` field persist and are retrieved as dicts by the planner.
-- Per-sample tournament retrieval: on a 10-entry eligible pool, K=8 independent draws produce 7 distinct prior subsets (validated by the test at `policy_loop/planner.py::generate_strategies`).
+- Per-sample tournament retrieval: on a 10-entry eligible pool, K=8 independent draws produce 7 distinct prior subsets (validated by the test at `dual_loops/planner.py::generate_strategies`).
 - Cosine LR + AdamW schedule: verified analytically against expected curve (peak 2e-5 at end of warmup, floor 2e-6 at T·S).
 - Checkpoint / resume: three-level (strategies pickle, executions.jsonl with fsync, Tinker LoRA state); successfully resumes mid-round.
 
@@ -57,7 +57,7 @@ export TINKER_API_KEY=...
 export CYBERGYM_API_KEY=...
 
 # 4. Train (archive + reflection on by default)
-uv run python -m policy_loop.train \
+uv run python -m dual_loops.train \
   --num-rounds 6 --batch-size 48 --num-substeps 6 \
   --group-size 8 --strategy-temperature 1.0 \
   --executor-model openai/Qwen/Qwen3.5-27B \
@@ -65,7 +65,7 @@ uv run python -m policy_loop.train \
   --executor-timeout 1800 --executor-parallel 64
 
 # Ablation: disable archive (falls back to unguided planner-executor loop)
-uv run python -m policy_loop.train [...] --no-archive
+uv run python -m dual_loops.train [...] --no-archive
 ```
 
 Cost and wall-time breakdown: see paper Appendix J.

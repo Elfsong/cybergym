@@ -1,8 +1,8 @@
 """Main iterative offline GRPO training loop.
 
 Usage:
-    uv run python -m policy_loop.train
-    uv run python -m policy_loop.train --num-rounds 3 --batch-size 10
+    uv run python -m dual_loops.train
+    uv run python -m dual_loops.train --num-rounds 3 --batch-size 10
 
 Each round:
     1. Sample batch_size tasks
@@ -40,7 +40,7 @@ from .utils import (
     setup_logging,
 )
 
-logger = logging.getLogger("policy_loop.train")
+logger = logging.getLogger("dual_loops.train")
 
 
 def build_tasks(task_ids: list[str], config: Config, archive: Archive | None) -> list[Task]:
@@ -328,7 +328,7 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
 
     If resume_from is provided, load the last completed round's Tinker state and
     continue from the next round. resume_from must point to a prior run_dir
-    (e.g. policy_loop_runs/<run_id>).
+    (e.g. dual_loops_runs/<run_id>).
     """
     # If resuming, reuse the existing run's output dir so logs/checkpoints extend.
     # If no rounds have completed yet, start_round stays at 0 — mid-round resume

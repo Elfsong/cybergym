@@ -28,22 +28,22 @@ Trains a Qwen3.5-27B LoRA planner via GRPO, using MiniMax-M2.5 (self-hosted vLLM
 
 ### Dry-run (validate executor/reward pipeline)
 ```bash
-uv run python -m policy_loop.dry_run --task-ids arvo:8933 arvo:13704
+uv run python -m dual_loops.dry_run --task-ids arvo:8933 arvo:13704
 ```
 
 ### Validate milestone detection
 ```bash
-uv run python -m policy_loop.validate_milestone
+uv run python -m dual_loops.validate_milestone
 ```
 
 ### Full training
 ```bash
-uv run python -m policy_loop.train --num-rounds 6 --batch-size 48 --num-substeps 6
+uv run python -m dual_loops.train --num-rounds 6 --batch-size 48 --num-substeps 6
 ```
 
 ### Ablation: turn off the archive
 ```bash
-uv run python -m policy_loop.train --num-rounds 6 --batch-size 48 --num-substeps 6 --no-archive
+uv run python -m dual_loops.train --num-rounds 6 --batch-size 48 --num-substeps 6 --no-archive
 ```
 
 ## Milestones (paper Table 2)
@@ -65,7 +65,7 @@ Without it, the detector caps at milestone 6.
 ## Output Structure
 
 ```
-policy_loop_runs/{run_id}/
+dual_loops_runs/{run_id}/
 ├── config.json                    # snapshot of config at run start
 ├── train.log                      # all log output
 ├── all_metrics.json               # per-round metrics summary

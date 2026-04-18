@@ -7,8 +7,8 @@ and checks that:
   - NO_SUBMIT tasks → milestone 0-2
 
 Usage:
-    uv run python -m policy_loop.validate_milestone
-    uv run python -m policy_loop.validate_milestone --verify-fix
+    uv run python -m dual_loops.validate_milestone
+    uv run python -m dual_loops.validate_milestone --verify-fix
 """
 
 from __future__ import annotations
