@@ -162,7 +162,7 @@ async def run_round(
     rewarded = score_results(results, config)
 
     # 4b) Reflection judge → (adherence, insight) per rollout → composite reward
-    from experience_loop.adherence import score_reflection_batch
+    from dual_loops.adherence import score_reflection_batch
     t_adh = time.monotonic()
     pairs = await score_reflection_batch(
         results,

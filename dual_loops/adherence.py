@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 import openai
 
 if TYPE_CHECKING:
-    from policy_loop.executor import ExecutionResult
+    from dual_loops.executor import ExecutionResult
 
 logger = logging.getLogger(__name__)
 

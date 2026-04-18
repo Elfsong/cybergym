@@ -25,7 +25,7 @@ dual_loops/
                       without touching Tinker
 ```
 
-Reflection judge + archive live under [`experience_loop/`](../experience_loop/) (new package). See that directory's PLAN.md for its own design notes.
+Reflection judge + archive live inside `dual_loops/` (`adherence.py`, `archive.py`). See [`EXPERIENCE_PLAN.md`](EXPERIENCE_PLAN.md) for the experience-loop design notes.
 
 ## Validated
 

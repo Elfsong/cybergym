@@ -1,1 +1,1 @@
-"""Iterative offline GRPO for strategy-level RL on CyberGym."""
+"""Dual training loops: policy loop (GRPO over weights) and experience loop (archive + reflection judge)."""
