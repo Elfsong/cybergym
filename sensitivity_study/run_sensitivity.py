@@ -63,7 +63,7 @@ def load_strategies():
     oracle_path = SCRIPT_DIR / "oracle_strategies.json"
     adversarial_path = SCRIPT_DIR / "adversarial_strategies.json"
     zeroshot_path = SCRIPT_DIR / "zeroshot_strategies_100.json"
-    tasks_path = PROJECT_DIR / "sensitivity_tasks.json"
+    tasks_path = SCRIPT_DIR / "tasks.json"
 
     with open(tasks_path) as f:
         tasks = json.load(f)

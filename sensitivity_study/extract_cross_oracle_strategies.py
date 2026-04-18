@@ -86,7 +86,7 @@ Be specific about the approach but do NOT write exact commands. Focus on the rea
 
 
 def main():
-    tasks_file = Path(__file__).parent.parent / "sensitivity_tasks.json"
+    tasks_file = Path(__file__).parent / "tasks.json"
     with open(tasks_file) as f:
         tasks = json.load(f)
 
