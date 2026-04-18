@@ -79,8 +79,12 @@ class Archive:
         n: int = 3,
         tournament_size: int = 4,
         min_milestone: int = 3,
-    ) -> list[tuple[str, int]]:
-        """Tournament selection: return up to n (strategy, milestone) pairs.
+    ) -> list[dict]:
+        """Tournament selection: return up to n prior records for this task.
+
+        Each returned record is a dict with keys {"strategy", "milestone", "insight"};
+        "insight" is an empty string when the source record predates reflection (v1/v2
+        archives) or when the reflection judge failed to produce one.
 
         - Filter the task's records to milestone >= min_milestone.
         - For each of n slots: sample t candidates, pick the highest-milestone one,
@@ -102,7 +106,14 @@ class Archive:
             selected.append(winner)
             remaining.remove(winner)
 
-        return [(r["strategy"], r["milestone"]) for r in selected]
+        return [
+            {
+                "strategy":  r["strategy"],
+                "milestone": r["milestone"],
+                "insight":   r.get("insight", "") or "",
+            }
+            for r in selected
+        ]
 
     def size(self) -> int:
         return sum(len(v) for v in self._index.values())

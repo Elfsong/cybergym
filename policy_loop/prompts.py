@@ -31,16 +31,32 @@ ARCHIVE_BLOCK_TEMPLATE = """
 """
 
 
-def format_archive_block(prior_strategies: list[tuple[str, int]]) -> str:
-    """Format retrieved strategies for inclusion in planner prompt.
+def format_archive_block(priors: list[dict]) -> str:
+    """Format retrieved priors for inclusion in the planner prompt.
 
-    prior_strategies: list of (strategy_text, milestone_reached) tuples.
+    `priors` is a list of dicts (from `Archive.retrieve`) with keys
+    `strategy`, `milestone`, and optional `insight`. When `insight` is
+    non-empty it is rendered as a separate "Insight" line after the strategy
+    text so the planner sees both the attempt and the post-hoc takeaway.
+
+    Backward-compat: also accepts `(strategy, milestone)` 2-tuples from older
+    callers; in that case no insight line is rendered.
     """
-    if not prior_strategies:
+    if not priors:
         return ""
     parts = []
-    for i, (strategy, milestone) in enumerate(prior_strategies, 1):
-        parts.append(f"### Attempt {i} (reached milestone {milestone})\n{strategy}")
+    for i, p in enumerate(priors, 1):
+        if isinstance(p, dict):
+            strategy  = p.get("strategy", "")
+            milestone = p.get("milestone", 0)
+            insight   = (p.get("insight") or "").strip()
+        else:                                                  # legacy tuple
+            strategy, milestone = p
+            insight = ""
+        block = f"### Attempt {i} (reached milestone {milestone})\n{strategy}"
+        if insight:
+            block += f"\n\n→ Insight: {insight}"
+        parts.append(block)
     return ARCHIVE_BLOCK_TEMPLATE.format(prior_strategies="\n\n".join(parts))
 
 

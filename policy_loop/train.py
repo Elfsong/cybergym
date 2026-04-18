@@ -259,11 +259,17 @@ async def run_round(
     mean_priors_per_sample = (
         sum(len(s.priors_shown) for s, _, _ in rewarded) / max(len(rewarded), 1)
     )
-    # Distinct prior-sets per task (unique priors_shown tuples within a K-group)
+    # Distinct prior-sets per task (unique priors_shown signatures within a K-group).
+    # priors_shown is a list of dicts {strategy, milestone, insight}; we hash by
+    # (strategy, milestone) since two draws with identical priors are structurally
+    # the same for the planner regardless of the insight text.
     from collections import defaultdict
     by_task_prior_sets: dict[str, set] = defaultdict(set)
     for s, _, _ in rewarded:
-        by_task_prior_sets[s.task_id].add(tuple((t, m) for t, m in s.priors_shown))
+        sig = tuple((p["strategy"], p["milestone"])
+                    if isinstance(p, dict) else tuple(p)
+                    for p in s.priors_shown)
+        by_task_prior_sets[s.task_id].add(sig)
     distinct_priors_counts = [len(v) for v in by_task_prior_sets.values()]
     mean_distinct_priors_per_task = (
         sum(distinct_priors_counts) / max(len(distinct_priors_counts), 1)

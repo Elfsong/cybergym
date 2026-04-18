@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -71,7 +72,7 @@ class StrategyToExecute:
     group_id: int = 0                 # index within the K-group (0..K-1)
     n_thinking_tokens: int = 0        # token-level length of the thinking span (pre-</think>)
     n_strategy_tokens: int = 0        # token-level length of the strategy span (post-</think>)
-    priors_shown: list = field(default_factory=list)  # list[(prior_strategy_text, milestone)] shown in this sample's prompt
+    priors_shown: list = field(default_factory=list)  # list[dict{strategy, milestone, insight}] shown in this sample's prompt
 
 
 def _split_thinking(text: str) -> tuple[str, str]:
@@ -171,11 +172,9 @@ class Planner:
             top_p=self.config.strategy_top_p,
             stop=self.renderer.get_stop_sequences(),
         )
-        self.adam_params = tinker.AdamParams(
-            learning_rate=self.config.learning_rate,
-            beta1=self.config.adam_beta1,
-            beta2=self.config.adam_beta2,
-        )
+        # Reference params (used when lr_schedule="constant"); cosine schedule rebuilds
+        # the params per substep in grpo_update.
+        self.adam_params = self._adam_params_at_lr(self.config.learning_rate)
         logger.info(
             f"Planner ready: {self.config.tinker_model} LoRA rank={self.config.tinker_rank}"
         )
@@ -283,7 +282,10 @@ class Planner:
         from collections import defaultdict
         by_task_hashes: dict[str, set] = defaultdict(set)
         for s in strategies:
-            by_task_hashes[s.task_id].add(tuple((t, m) for t, m in s.priors_shown))
+            sig = tuple((p["strategy"], p["milestone"])
+                        if isinstance(p, dict) else tuple(p)
+                        for p in s.priors_shown)
+            by_task_hashes[s.task_id].add(sig)
         distinct_per_task = [len(v) for v in by_task_hashes.values()]
         if distinct_per_task:
             mean_distinct = sum(distinct_per_task) / len(distinct_per_task)
@@ -388,6 +390,37 @@ class Planner:
             i += size
         return splits
 
+    def _adam_params_at_lr(self, lr: float):
+        """Build a fresh AdamParams with the given learning rate and the configured
+        AdamW / grad-clip settings."""
+        return tinker.AdamParams(
+            learning_rate=lr,
+            beta1=self.config.adam_beta1,
+            beta2=self.config.adam_beta2,
+            weight_decay=self.config.adam_weight_decay,
+            grad_clip_norm=self.config.grad_clip_norm,
+        )
+
+    def _lr_at_step(self, global_step: int) -> float:
+        """LR schedule evaluated at a zero-indexed global substep counter.
+
+        Supports ``"constant"`` and ``"cosine"``. Cosine: linear warmup for the
+        first ``lr_warmup_ratio * total_steps`` substeps, then cosine decay from
+        ``learning_rate`` to ``learning_rate * lr_min_ratio`` over the remainder.
+        """
+        cfg = self.config
+        peak = cfg.learning_rate
+        total = max(cfg.num_rounds * max(cfg.num_substeps, 1), 1)
+        if cfg.lr_schedule == "constant":
+            return peak
+        warmup = max(int(total * cfg.lr_warmup_ratio), 0)
+        if global_step < warmup:
+            return peak * (global_step + 1) / max(warmup, 1)
+        progress = (global_step - warmup) / max(total - warmup, 1)
+        progress = min(max(progress, 0.0), 1.0)
+        floor = peak * cfg.lr_min_ratio
+        return floor + 0.5 * (peak - floor) * (1.0 + math.cos(math.pi * progress))
+
     async def grpo_update(
         self,
         strategies_with_rewards: list[tuple[StrategyToExecute, float]],
@@ -432,11 +465,20 @@ class Planner:
         # 3. Pipelined fwd_bwd + optim_step (pattern from tinker_cookbook.rl.train.train_step)
         substep_metrics: list[dict] = []
 
+        # Global substep index drives the LR schedule; round_idx * configured-S is the
+        # base, and within-round substep i increments it. Using configured num_substeps
+        # (not `actual_substeps`) keeps the schedule reproducible across runs even when
+        # a round happens to drop degenerate groups down to fewer substeps.
+        base_step = round_idx * max(self.config.num_substeps, 1)
+
+        def _adam(i: int):
+            return self._adam_params_at_lr(self._lr_at_step(base_step + i))
+
         # Enqueue first batch
         fwd_bwd_future = await self.training_client.forward_backward_async(
             datum_batches[0], loss_fn="importance_sampling",
         )
-        optim_future = await self.training_client.optim_step_async(self.adam_params)
+        optim_future = await self.training_client.optim_step_async(_adam(0))
 
         for i in range(actual_substeps):
             # Enqueue next batch before awaiting current (keeps pipeline full)
@@ -444,7 +486,7 @@ class Planner:
                 next_fwd = await self.training_client.forward_backward_async(
                     datum_batches[i + 1], loss_fn="importance_sampling",
                 )
-                next_opt = await self.training_client.optim_step_async(self.adam_params)
+                next_opt = await self.training_client.optim_step_async(_adam(i + 1))
             else:
                 next_fwd = None
                 next_opt = None
@@ -455,6 +497,7 @@ class Planner:
             step_info = {
                 "substep": i,
                 "n_datums": len(datum_batches[i]),
+                "lr": self._lr_at_step(base_step + i),
             }
             if getattr(opt_result, "metrics", None):
                 step_info["optim_metrics"] = dict(opt_result.metrics)

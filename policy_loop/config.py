@@ -31,10 +31,15 @@ class Config:
     batch_size: int = 100            # tasks per round
     num_substeps: int = 1            # mini-batch gradient updates per round (1 = single update)
     grad_accum: int = 4
-    learning_rate: float = 2e-5
+    learning_rate: float = 2e-5           # peak LR (also the constant LR when lr_schedule="constant")
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
-    kl_beta: float = 0.01
+    adam_weight_decay: float = 0.01        # AdamW weight decay (Tinker default is 0.0)
+    grad_clip_norm: float = 1.0            # global grad-norm clip (Tinker default is 0.0 = disabled)
+    lr_schedule: str = "cosine"            # {"constant", "cosine"}
+    lr_min_ratio: float = 0.1              # cosine floor: min_lr = learning_rate * lr_min_ratio
+    lr_warmup_ratio: float = 0.05          # linear warmup over first lr_warmup_ratio * total_steps steps
+    kl_beta: float = 0.01                  # reserved (not currently wired into Tinker loss)
     num_rounds: int = 10
     max_strategy_tokens: int = 16384
     strategy_temperature: float = 0.7
