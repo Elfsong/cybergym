@@ -28,8 +28,9 @@ class Config:
 
     # --- GRPO training ---
     group_size: int = 8
-    batch_size: int = 100            # tasks per round
-    num_substeps: int = 1            # mini-batch gradient updates per round (1 = single update)
+    batch_size: int = 100            # tasks per round (task groups per round)
+    mini_batch_size: int = 8         # task groups per GRPO mini-batch.
+                                     # Substeps per round are derived: S = ceil(batch_size / mini_batch_size).
     grad_accum: int = 4
     learning_rate: float = 2e-5           # peak LR (also the constant LR when lr_schedule="constant")
     adam_beta1: float = 0.9

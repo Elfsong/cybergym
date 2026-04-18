@@ -352,7 +352,7 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
     logger.info(f"Executor: {config.executor_model} at {config.executor_base_url}")
     logger.info(
         f"GRPO: K={config.group_size}, batch={config.batch_size}, "
-        f"num_substeps={config.num_substeps}, rounds={config.num_rounds}, "
+        f"mini_batch_size={config.mini_batch_size}, rounds={config.num_rounds}, "
         f"lr={config.learning_rate}"
     )
     logger.info(
@@ -464,8 +464,9 @@ def main() -> None:
     parser.add_argument("--executor-timeout", type=int, default=None)
     parser.add_argument("--tinker-api-key", type=str, default=None)
     parser.add_argument("--cybergym-api-key", type=str, default=None)
-    parser.add_argument("--num-substeps", type=int, default=None,
-                        help="Mini-batch gradient updates per round (default 1)")
+    parser.add_argument("--mini-batch-size", type=int, default=None,
+                        help="Task groups per GRPO mini-batch. Substeps per round are "
+                             "derived as ⌈batch_size / mini_batch_size⌉. Default 8.")
     parser.add_argument("--strategy-temperature", type=float, default=None,
                         help="Sampling temperature for strategy generation (default 0.7)")
     parser.add_argument("--strategy-top-p", type=float, default=None,
@@ -485,8 +486,8 @@ def main() -> None:
         config.batch_size = args.batch_size
     if args.group_size is not None:
         config.group_size = args.group_size
-    if args.num_substeps is not None:
-        config.num_substeps = args.num_substeps
+    if args.mini_batch_size is not None:
+        config.mini_batch_size = args.mini_batch_size
     if args.strategy_temperature is not None:
         config.strategy_temperature = args.strategy_temperature
     if args.strategy_top_p is not None:

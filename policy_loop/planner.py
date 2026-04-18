@@ -410,7 +410,9 @@ class Planner:
         """
         cfg = self.config
         peak = cfg.learning_rate
-        total = max(cfg.num_rounds * max(cfg.num_substeps, 1), 1)
+        mbs = max(cfg.mini_batch_size, 1)
+        sub_per_round = max(1, (cfg.batch_size + mbs - 1) // mbs)
+        total = max(cfg.num_rounds * sub_per_round, 1)
         if cfg.lr_schedule == "constant":
             return peak
         warmup = max(int(total * cfg.lr_warmup_ratio), 0)
@@ -428,11 +430,13 @@ class Planner:
         round_idx: int = 0,
         eps: float = 1e-8,
     ) -> dict:
-        """Compute GRPO advantages per-task-group, build Datums, run `num_substeps`
-        pipelined forward_backward + optim_step updates (mini-batch iterative GRPO).
+        """Compute GRPO advantages per-task-group, build Datums, run one
+        pipelined forward_backward + optim_step update per mini-batch
+        (mini-batch iterative GRPO).
 
-        Each substep uses a disjoint subset of task groups (GRPO groups stay intact
-        within a substep). `num_substeps=1` recovers the single-update behavior.
+        Substeps per round = ceil(batch_size / mini_batch_size). Each mini-batch
+        is a disjoint subset of task groups (GRPO groups stay intact within a
+        mini-batch). `mini_batch_size >= batch_size` recovers single-step behavior.
 
         Returns summary metrics plus per-substep info.
         """
@@ -444,7 +448,8 @@ class Planner:
 
         if not task_datums:
             logger.warning("No datums to train on this round (all groups degenerate)")
-            metrics.update({"num_substeps": 0, "substep_datum_counts": []})
+            metrics.update({"num_substeps": 0, "mini_batch_size": self.config.mini_batch_size,
+                            "substep_datum_counts": []})
             return metrics
 
         # 2. Shuffle task_ids deterministically per-round, split into substeps
@@ -452,8 +457,9 @@ class Planner:
         rng = random.Random(42 + round_idx)
         rng.shuffle(task_ids)
 
-        num_substeps = max(1, self.config.num_substeps)
-        task_splits = self._split_task_ids(task_ids, num_substeps)
+        mbs = max(1, self.config.mini_batch_size)
+        num_splits = max(1, (len(task_ids) + mbs - 1) // mbs)
+        task_splits = self._split_task_ids(task_ids, num_splits)
         datum_batches: list[list] = [
             [d for tid in split for d in task_datums[tid]]
             for split in task_splits
@@ -465,11 +471,13 @@ class Planner:
         # 3. Pipelined fwd_bwd + optim_step (pattern from tinker_cookbook.rl.train.train_step)
         substep_metrics: list[dict] = []
 
-        # Global substep index drives the LR schedule; round_idx * configured-S is the
-        # base, and within-round substep i increments it. Using configured num_substeps
-        # (not `actual_substeps`) keeps the schedule reproducible across runs even when
-        # a round happens to drop degenerate groups down to fewer substeps.
-        base_step = round_idx * max(self.config.num_substeps, 1)
+        # Global substep index drives the LR schedule. The base step per round is
+        # computed from the CONFIGURED budget (batch_size / mini_batch_size), not
+        # from `actual_substeps`, so the schedule stays reproducible across runs
+        # even when a round drops degenerate groups and runs fewer actual substeps.
+        mbs_cfg = max(self.config.mini_batch_size, 1)
+        sub_per_round_cfg = max(1, (self.config.batch_size + mbs_cfg - 1) // mbs_cfg)
+        base_step = round_idx * sub_per_round_cfg
 
         def _adam(i: int):
             return self._adam_params_at_lr(self._lr_at_step(base_step + i))
@@ -509,6 +517,7 @@ class Planner:
 
         metrics.update({
             "num_substeps": actual_substeps,
+            "mini_batch_size": self.config.mini_batch_size,
             "substep_datum_counts": [len(b) for b in datum_batches],
             "substep_metrics": substep_metrics,
         })
