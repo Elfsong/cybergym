@@ -468,7 +468,7 @@ def main() -> None:
                         help="Task groups per GRPO mini-batch. Substeps per round are "
                              "derived as ⌈batch_size / mini_batch_size⌉. Default 8.")
     parser.add_argument("--strategy-temperature", type=float, default=None,
-                        help="Sampling temperature for strategy generation (default 0.7)")
+                        help="Sampling temperature for strategy generation (default 1.0)")
     parser.add_argument("--strategy-top-p", type=float, default=None,
                         help="Nucleus sampling top_p for strategy generation (default 0.95)")
     parser.add_argument("--train-root", type=Path, default=None,

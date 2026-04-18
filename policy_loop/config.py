@@ -43,7 +43,7 @@ class Config:
     kl_beta: float = 0.01                  # reserved (not currently wired into Tinker loss)
     num_rounds: int = 10
     max_strategy_tokens: int = 16384
-    strategy_temperature: float = 0.7
+    strategy_temperature: float = 1.0   # higher temp gives intra-group strategy diversity
     strategy_top_p: float = 0.95
 
     # --- Reward (milestone 0-7 → reward value) ---
