@@ -27,6 +27,24 @@ from cybergym.task.types import TaskConfig, TaskDifficulty
 
 SCRIPT_DIR = Path(__file__).parent
 PROMPT_PATH = SCRIPT_DIR / "examples" / "agents" / "claude_code" / "prompt.txt"
+DEFAULT_RESUME_GLOB = "/data/cybergym_data/cybergym-eval-data/eval_claude_code_*/logs"
+
+
+def find_completed_tasks(resume_glob: str) -> set[str]:
+    """Scan prior eval runs for tasks with existing trajectories."""
+    completed = set()
+    for log_dir in glob.glob(resume_glob):
+        for entry in Path(log_dir).iterdir():
+            if not entry.is_dir():
+                continue
+            # Dir name format: {task_norm}-{uuid32hex}
+            parts = entry.name.rsplit("-", 1)
+            if len(parts) == 2 and len(parts[1]) == 32:
+                traj = entry / "trajectory.jsonl"
+                if traj.exists() and traj.stat().st_size > 0:
+                    task_id = parts[0].replace("_", ":", 1)
+                    completed.add(task_id)
+    return completed
 
 
 class _Tee:
@@ -309,6 +327,10 @@ def main():
     parser.add_argument("--parallel", type=int, default=16)
     parser.add_argument("--tasks-file", default=None)
     parser.add_argument("--stagger", type=float, default=0.5)
+    parser.add_argument("--skip-completed", action="store_true",
+                        help="Skip tasks with existing trajectories in prior eval runs")
+    parser.add_argument("--resume-dirs", default=DEFAULT_RESUME_GLOB,
+                        help="Glob pattern for dirs to scan for completed tasks")
     args = parser.parse_args()
 
     # Append run UUID to out-dir
@@ -324,6 +346,12 @@ def main():
     if not tasks:
         print(f"Error: No tasks found in {tasks_file}", file=sys.stderr)
         sys.exit(1)
+
+    if args.skip_completed:
+        completed = find_completed_tasks(args.resume_dirs)
+        before = len(tasks)
+        tasks = [t for t in tasks if t not in completed]
+        print(f"Skipping {before - len(tasks)} completed tasks ({len(tasks)} remaining)")
 
     total = len(tasks)
     log_dir = f"{args.out_dir}/logs"
