@@ -423,7 +423,7 @@ def compute_reward(
     where f_think = min(thinking_length / thinking_ref, 1) and likewise for f_strat.
     Both length terms saturate at 1.0 so very long thinking doesn't dominate the reward.
 
-    All γ, λ default to 0 → reduces to flat milestone reward (Phase 1 behavior).
+    With `adherence=1.0` and all γ/λ = 0 this reduces to the bare milestone reward.
     """
     r_mile = MILESTONE_REWARDS[milestone]
     f_think = min(thinking_length / max(thinking_ref_tokens, 1), 1.0)

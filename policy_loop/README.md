@@ -18,7 +18,7 @@ Trains a Qwen3.5-27B LoRA planner via GRPO, using MiniMax-M2.5 (self-hosted vLLM
 | `planner.py` | Tinker LoRA client: `generate_strategies()`, `grpo_update()`, `save_checkpoint()` |
 | `executor.py` | Parallel OpenHands subprocess per strategy, strategy injected via `--prompt_file` |
 | `reward.py` | Milestone 0-7 detection + CyberGym fix-build verification |
-| `archive.py` | (Phase 2) JSONL experience store + tournament selection retrieval |
+| `archive.py` | JSONL experience store + tournament-selection retrieval |
 | `utils.py` | Helpers: logging, task loading, JSON/JSONL I/O |
 | `train.py` | Main loop: generate → execute → score → GRPO → checkpoint |
 | `validate_milestone.py` | Sanity-check milestone detection on existing trajectories |
@@ -38,12 +38,12 @@ uv run python -m policy_loop.validate_milestone
 
 ### Full training
 ```bash
-uv run python -m policy_loop.train --num-rounds 3 --batch-size 20
+uv run python -m policy_loop.train --num-rounds 6 --batch-size 48 --num-substeps 6
 ```
 
-### Phase 2 with archive
+### Ablation: turn off the archive
 ```bash
-uv run python -m policy_loop.train --num-rounds 10 --batch-size 100 --archive
+uv run python -m policy_loop.train --num-rounds 6 --batch-size 48 --num-substeps 6 --no-archive
 ```
 
 ## Milestones (paper Table 2)
@@ -69,7 +69,7 @@ policy_loop_runs/{run_id}/
 ├── config.json                    # snapshot of config at run start
 ├── train.log                      # all log output
 ├── all_metrics.json               # per-round metrics summary
-├── archive.jsonl                  # (Phase 2) accumulating (strategy, milestone, task_id)
+├── archive.jsonl                  # accumulating (strategy, milestone, adherence, insight, …)
 ├── checkpoints/
 │   ├── round_000/
 │   │   ├── lora_weights           # Tinker checkpoint
@@ -84,7 +84,15 @@ policy_loop_runs/{run_id}/
             └── trajectory
 ```
 
-## Phases
+## Architecture
 
-**Phase 1**: milestone reward only (`lambda_adherence=0`, no archive).
-**Phase 2**: add archive retrieval (tournament selection) and adherence gate.
+The policy loop trains the planner's LoRA weights via GRPO. The experience
+loop appends each rollout's `(strategy, milestone, adherence, insight)` to
+an archive retrieved on the next round's planner prompt. Composite reward:
+
+    r = a · r_milestone + λ · a + γ_t · f_think + γ_s · f_strat
+
+where `a` is the reflection judge's adherence score and `λ, γ_t, γ_s`
+default to 0.5, 0, 0. Ablations: `--no-archive` disables the archive;
+`--lambda-adherence 0` removes the adherence bonus (but the gate still
+applies through `a · r_milestone`).

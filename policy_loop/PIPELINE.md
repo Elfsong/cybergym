@@ -40,7 +40,7 @@ rounds (default 10).
 | `planner.py` | Tinker LoRA client: `generate_strategies()`, `grpo_update()`, save/load state |
 | `executor.py` | Parallel OpenHands subprocesses, each running one strategy |
 | `reward.py` | Milestone 0–7 detection + CyberGym `/verify-agent-pocs` for milestone 7 |
-| `archive.py` | (Phase 2) experience store + tournament retrieval |
+| `archive.py` | experience store + tournament retrieval |
 | `prompts.py` | Planner system/user templates + strategy-injection template for the executor |
 | `utils.py` | Task-file parsing, JSON/JSONL I/O, logging setup |
 
@@ -161,7 +161,7 @@ Inside `grpo_update`:
 
 Returns per-substep metrics and aggregate group stats.
 
-### 6. Archive append (Phase 2 only)
+### 6. Archive append
 
 ```
 if archive is not None and config.archive_enabled:
@@ -253,7 +253,7 @@ at the end of each successful round.
 ├── config_resumed_from_<N>.json     # snapshot(s) added on each resume
 ├── train.log                        # all-round append-only log
 ├── all_metrics.json                 # per-round summaries (written at end of run)
-├── archive.jsonl                    # Phase 2 experience store
+├── archive.jsonl                    # experience store (strategy / milestone / adherence / insight / …)
 ├── checkpoints/
 │   └── round_XXX/
 │       └── metrics.json             # includes tinker_checkpoint ref

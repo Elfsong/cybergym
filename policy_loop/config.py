@@ -47,27 +47,26 @@ class Config:
 
     # --- Reward (milestone 0-7 → reward value) ---
     milestone_rewards: tuple = (0.0, 0.5, 1.5, 2.5, 4.0, 5.5, 8.0, 12.0)
-    lambda_adherence: float = 0.0    # Phase 1: disabled
+    lambda_adherence: float = 0.5    # adherence-bonus weight in the composite reward
     gamma_thinking: float = 0.0      # reward weight on f_think = min(n_think/ref, 1)
     gamma_strategy: float = 0.0      # reward weight on f_strat = min(n_strat/ref, 1)
     thinking_ref_tokens: int = 3000  # saturation threshold for f_think (≈ observed p70)
     strategy_ref_tokens: int = 500   # saturation threshold for f_strat (≈ observed p90)
 
-    # --- Archive (Phase 2) ---
-    archive_enabled: bool = False
+    # --- Experience archive (always part of the architecture; flag present for ablations) ---
+    archive_enabled: bool = True
     archive_n: int = 3               # top-n strategies in context
     archive_tournament_size: int = 4
     archive_min_milestone: int = 3   # only retrieve strategies that submitted
 
-    # --- Phase 2: reflection judge (adherence + insight) ---
-    phase2_enabled: bool = False     # master switch; implies archive_enabled
+    # --- Reflection judge (adherence + insight) ---
     adherence_judge_model: str = "Qwen/Qwen3.5-27B"
     adherence_judge_base_url: str = "http://localhost:8001/v1"
     adherence_max_traj_chars: int = 8000
     adherence_concurrency: int = 64
-    reflection_max_tokens: int = 8192   # Qwen3.5-27B has a long CoT ("Thinking Process:") before it
-                                        # emits the final <adherence>/<insight> tags. We keep thinking
-                                        # mode ON (better judgment quality) and give the budget to fit it.
+    reflection_max_tokens: int = 8192   # Qwen3.5-27B emits a long CoT ("Thinking Process:") before
+                                        # producing the final <adherence>/<insight> tags; we keep
+                                        # thinking mode ON and give the budget to fit it.
 
     # --- Paths ---
     data_dir: Path = Path("/data/cybergym_data/cybergym-benchmark-data/data")

@@ -1,1 +1,1 @@
-"""Experience loop — Phase 2 extension (archive conditioning + adherence judge)."""
+"""Experience loop — archive retrieval conditioning + reflection-based adherence judge."""

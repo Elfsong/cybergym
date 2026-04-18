@@ -11,7 +11,7 @@ Each round:
     4. Score each: milestone → reward
     5. Compute GRPO advantages (per task group), gradient step
     6. Save checkpoint + metrics
-    7. (Phase 2) append to experience archive
+    7. Append (strategy, milestone, adherence, insight) records to the experience archive
 """
 
 from __future__ import annotations
@@ -158,50 +158,45 @@ async def run_round(
     exec_seconds = int(time.monotonic() - t_exec)
     logger.info(f"Execution: {len(results)} rollouts in {exec_seconds}s")
 
-    # 4a) Score milestone (flat reward with adherence=1.0)
+    # 4a) Score milestone (initial pass uses adherence=1.0; reflection below supplies the real value)
     rewarded = score_results(results, config)
 
-    # 4b) Phase 2: reflection judge → (adherence, insight) per rollout → composite reward
-    adherences: list[float] = [1.0] * len(rewarded)
-    insights: list[str] = [""] * len(rewarded)
-    adh_seconds = 0
-    if config.phase2_enabled:
-        from experience_loop.adherence import score_reflection_batch
-        t_adh = time.monotonic()
-        pairs = await score_reflection_batch(
-            results,
-            base_url=config.adherence_judge_base_url,
-            model=config.adherence_judge_model,
-            concurrency=config.adherence_concurrency,
-            max_traj_chars=config.adherence_max_traj_chars,
-            max_tokens=config.reflection_max_tokens,
-        )
-        adherences = [a for a, _ in pairs]
-        insights = [ins for _, ins in pairs]
-        adh_seconds = int(time.monotonic() - t_adh)
-        # Recompute reward with composite formula:
-        #   r = a · r_m + λ · a + γ_t · f_think + γ_s · f_strat
-        rewarded = [
-            (s, compute_reward(
-                milestone=m,
-                adherence=adherences[i],
-                lambda_adherence=config.lambda_adherence,
-                thinking_length=s.n_thinking_tokens,
-                strategy_length=s.n_strategy_tokens,
-                gamma_thinking=config.gamma_thinking,
-                gamma_strategy=config.gamma_strategy,
-                thinking_ref_tokens=config.thinking_ref_tokens,
-                strategy_ref_tokens=config.strategy_ref_tokens,
-            ), m)
-            for i, (s, _, m) in enumerate(rewarded)
-        ]
-        mean_adherence = sum(adherences) / max(len(adherences), 1)
-        n_with_insight = sum(1 for ins in insights if ins)
-        logger.info(
-            f"Reflection: mean_adherence={mean_adherence:.3f}, insights={n_with_insight}/{len(insights)} "
-            f"in {adh_seconds}s (λ={config.lambda_adherence})"
-        )
+    # 4b) Reflection judge → (adherence, insight) per rollout → composite reward
+    from experience_loop.adherence import score_reflection_batch
+    t_adh = time.monotonic()
+    pairs = await score_reflection_batch(
+        results,
+        base_url=config.adherence_judge_base_url,
+        model=config.adherence_judge_model,
+        concurrency=config.adherence_concurrency,
+        max_traj_chars=config.adherence_max_traj_chars,
+        max_tokens=config.reflection_max_tokens,
+    )
+    adherences = [a for a, _ in pairs]
+    insights = [ins for _, ins in pairs]
+    adh_seconds = int(time.monotonic() - t_adh)
+    # Recompose reward with the gated / composite formula:
+    #   r = a · r_milestone + λ · a + γ_t · f_think + γ_s · f_strat
+    rewarded = [
+        (s, compute_reward(
+            milestone=m,
+            adherence=adherences[i],
+            lambda_adherence=config.lambda_adherence,
+            thinking_length=s.n_thinking_tokens,
+            strategy_length=s.n_strategy_tokens,
+            gamma_thinking=config.gamma_thinking,
+            gamma_strategy=config.gamma_strategy,
+            thinking_ref_tokens=config.thinking_ref_tokens,
+            strategy_ref_tokens=config.strategy_ref_tokens,
+        ), m)
+        for i, (s, _, m) in enumerate(rewarded)
+    ]
     mean_adherence = sum(adherences) / max(len(adherences), 1)
+    n_with_insight = sum(1 for ins in insights if ins)
+    logger.info(
+        f"Reflection: mean_adherence={mean_adherence:.3f}, insights={n_with_insight}/{len(insights)} "
+        f"in {adh_seconds}s (λ={config.lambda_adherence})"
+    )
 
     # Save detailed per-strategy outcomes
     save_jsonl(
@@ -228,7 +223,7 @@ async def run_round(
         round_idx=round_idx,
     )
 
-    # 6) Archive (Phase 2 v3 schema — adds insight from reflection pass)
+    # 6) Archive append — the v3 record carries strategy, milestone, adherence, insight, plus metadata
     if archive is not None and config.archive_enabled:
         archive.append_batch([
             {
@@ -360,13 +355,11 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
         f"num_substeps={config.num_substeps}, rounds={config.num_rounds}, "
         f"lr={config.learning_rate}"
     )
-    if config.phase2_enabled:
-        logger.info(
-            f"Phase 2: archive=ON, adherence judge={config.adherence_judge_model} "
-            f"@ {config.adherence_judge_base_url}, λ={config.lambda_adherence}"
-        )
-    elif config.archive_enabled:
-        logger.info("Phase 2: archive=ON (adherence judge OFF — flat milestone reward)")
+    logger.info(
+        f"Archive: {'ON' if config.archive_enabled else 'OFF'} | "
+        f"Reflection judge: {config.adherence_judge_model} @ {config.adherence_judge_base_url} | "
+        f"λ={config.lambda_adherence}, γ_t={config.gamma_thinking}, γ_s={config.gamma_strategy}"
+    )
     if start_round > 0:
         logger.info(f"RESUMING from round {start_round} (last completed: {start_round - 1})")
 
@@ -449,13 +442,12 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--group-size", type=int, default=None)
     parser.add_argument("--tasks-file", type=Path, default=None)
-    parser.add_argument("--archive", action="store_true", help="Enable experience archive (Phase 2 prerequisite)")
-    parser.add_argument("--phase2", action="store_true",
-                        help="Enable full Phase 2: archive + adherence judge (implies --archive). "
-                             "Bumps lambda_adherence to 0.5 unless --lambda-adherence is also given.")
+    parser.add_argument("--no-archive", action="store_true",
+                        help="Ablation: disable the experience archive (archive retrieval returns empty; "
+                             "archive append is skipped). Archive is ON by default.")
     parser.add_argument("--lambda-adherence", type=float, default=None,
-                        help="Coefficient on adherence-only bonus in composite reward (Phase 2). "
-                             "Reward = a · r_milestone + λ · a. Default 0.5 when --phase2 is set.")
+                        help="Coefficient on adherence-only bonus in composite reward "
+                             "(reward = a · r_milestone + λ · a + …). Default 0.5.")
     parser.add_argument("--gamma-thinking", type=float, default=None,
                         help="Reward weight on normalized thinking length (γ_t · min(n_think/ref, 1)). "
                              "0 disables (default).")
@@ -513,13 +505,8 @@ def main() -> None:
         config.tinker_api_key = args.tinker_api_key
     if args.cybergym_api_key is not None:
         config.cybergym_api_key = args.cybergym_api_key
-    if args.archive:
-        config.archive_enabled = True
-    if args.phase2:
-        config.phase2_enabled = True
-        config.archive_enabled = True          # phase2 always uses the archive
-        if args.lambda_adherence is None:
-            config.lambda_adherence = 0.5       # sensible default; overridable
+    if args.no_archive:
+        config.archive_enabled = False
     if args.lambda_adherence is not None:
         config.lambda_adherence = args.lambda_adherence
     if args.gamma_thinking is not None:

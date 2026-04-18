@@ -1,4 +1,4 @@
-"""Experience archive with tournament selection retrieval (Phase 2)."""
+"""Experience archive with tournament selection retrieval."""
 
 from __future__ import annotations
 
