@@ -215,7 +215,17 @@ def _run_single(
         subprocess_returncode=returncode,
         log_dir=log_dir / (traj_path.parent.name if traj_path else sub_dir),
     )
-    status = "OK" if traj_path else "NO_TRAJ"
+    # Three-state status so diagnostics can distinguish the two no-trajectory modes:
+    #   OK      — trajectory file found (subprocess produced a full or partial trace)
+    #   TIMEOUT — no trajectory AND ran close to the wall-clock budget (agent still
+    #             looping when SIGKILL'd; typical for hard tasks with huge source trees)
+    #   CRASH   — no trajectory AND died quickly (Docker startup race, port conflict, etc.)
+    if traj_path is not None:
+        status = "OK"
+    elif elapsed >= config.executor_timeout - 5:
+        status = "TIMEOUT"
+    else:
+        status = "CRASH"
     logger.info(
         f"[{idx+1}/{total}] {strategy.task_id} ({strategy.group_id}) "
         f"{status} in {elapsed//60}m{elapsed%60:02d}s"
@@ -230,8 +240,8 @@ def _load_exec_checkpoint(
 ) -> dict[int, ExecutionResult]:
     """Load previously-completed ExecutionResults keyed by submission index.
 
-    Only entries whose trajectory file still exists on disk are kept; NO_TRAJ
-    or missing-file entries are dropped so they get retried on resume. Entries
+    Only entries whose trajectory file still exists on disk are kept; TIMEOUT
+    / CRASH / missing-file entries are dropped so they get retried on resume. Entries
     whose (task_id, group_id) no longer match the current strategies list are
     also discarded (guards against a stale checkpoint from a different run).
     """
