@@ -34,6 +34,10 @@
             "_source": "DashScope preview SKU; pricing not yet published — placeholder 0",
             "input": 0.0, "output": 0.0
         },
+        "qwen3.6-plus": {
+            "_source": "DashScope 0-256K tier (¥2/¥12 per M → USD@7.2); 256K-1M: $1.111/$6.667",
+            "input": 0.278, "output": 1.667
+        },
         "Qwen/Qwen3.5-4B": {
             "input": 0.22, "output": 0.67, "train": 0.67
         },
