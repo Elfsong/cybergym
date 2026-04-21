@@ -158,7 +158,11 @@ def _run_single(
         ]
         env = {
             **os.environ,
-            "LLM_API_KEY": os.environ.get("LLM_API_KEY", "EMPTY"),
+            # OpenHands/LiteLLM reads LLM_API_KEY from env. Use the resolved
+            # executor_api_key (fallback chain: EXECUTOR_API_KEY > DASHSCOPE_API_KEY
+            # > LLM_API_KEY > "EMPTY") so the same code path works for both
+            # local vLLM (unvalidated, "EMPTY") and DashScope (real key).
+            "LLM_API_KEY": config.executor_api_key or "EMPTY",
             "TMPDIR": str(tmp_dir),  # Force subprocesses to use round tmp, not /tmp
         }
         proc = subprocess.Popen(

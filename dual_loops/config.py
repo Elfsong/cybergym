@@ -21,9 +21,22 @@ class Config:
                                     # gathered per round; cap prevents the naive
                                     # 768-way asyncio.gather when K=16, B=48).
 
-    # --- Executor (Qwen3.5-27B via vLLM + OpenHands) ---
+    # --- Executor (OpenHands scaffold; vLLM or DashScope backend) ---
+    # Defaults target the local 8xA100 vLLM. To route the executor to
+    # DashScope instead, set at launch time:
+    #   --executor-model     openai/qwen3.6-plus
+    #   --executor-base-url  https://dashscope.aliyuncs.com/compatible-mode/v1
+    #   --executor-api-key   $DASHSCOPE_API_KEY
+    # (or drop DASHSCOPE_API_KEY into the environment and let the fallback
+    #  chain below pick it up.)
     executor_model: str = "openai/Qwen/Qwen3.5-27B"
     executor_base_url: str = "http://localhost:8001/v1"
+    executor_api_key: str = field(default_factory=lambda: (
+        os.getenv("EXECUTOR_API_KEY")
+        or os.getenv("DASHSCOPE_API_KEY")
+        or os.getenv("LLM_API_KEY")
+        or "EMPTY"
+    ))
     executor_parallel: int = 64
     executor_timeout: int = 2400
     executor_max_iter: int = 72

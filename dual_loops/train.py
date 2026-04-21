@@ -17,6 +17,13 @@ Usage:
     # Resume a previous run from its last completed round
     uv run python -m dual_loops.train --resume-from /path/to/<run_id>
 
+    # Swap the executor from local vLLM to DashScope cloud API
+    # (planner + judge still on local vLLM / Tinker; only rollout execution moves)
+    uv run python -m dual_loops.train \
+      --executor-model    openai/qwen3.6-plus \
+      --executor-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
+      --executor-api-key  "$DASHSCOPE_API_KEY"
+
 Each round:
     1. Sample batch_size tasks
     2. Generate K strategies per task (Tinker, on-policy)
@@ -502,6 +509,13 @@ def main() -> None:
     parser.add_argument("--executor-parallel", type=int, default=None)
     parser.add_argument("--executor-model", type=str, default=None)
     parser.add_argument("--executor-base-url", type=str, default=None)
+    parser.add_argument("--executor-api-key", type=str, default=None,
+                        help="API key the executor forwards via LLM_API_KEY "
+                             "to OpenHands/LiteLLM. Pass a real DashScope key "
+                             "when running executor against DashScope; leave "
+                             "unset (or 'EMPTY') for the local vLLM default. "
+                             "If unset, falls back to EXECUTOR_API_KEY > "
+                             "DASHSCOPE_API_KEY > LLM_API_KEY env vars.")
     parser.add_argument("--executor-timeout", type=int, default=None)
     parser.add_argument("--tinker-api-key", type=str, default=None)
     parser.add_argument("--cybergym-api-key", type=str, default=None)
@@ -545,6 +559,8 @@ def main() -> None:
         config.executor_model = args.executor_model
     if args.executor_base_url is not None:
         config.executor_base_url = args.executor_base_url
+    if args.executor_api_key is not None:
+        config.executor_api_key = args.executor_api_key
     if args.executor_timeout is not None:
         config.executor_timeout = args.executor_timeout
     if args.tinker_api_key is not None:
