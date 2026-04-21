@@ -16,6 +16,10 @@ class Config:
     tinker_model: str = "Qwen/Qwen3.5-27B"
     tinker_rank: int = 32
     tinker_api_key: str = field(default_factory=lambda: os.getenv("TINKER_API_KEY", ""))
+    planner_parallel: int = 64      # Max concurrent Tinker sample_async calls
+                                    # during strategy generation (K*B coroutines
+                                    # gathered per round; cap prevents the naive
+                                    # 768-way asyncio.gather when K=16, B=48).
 
     # --- Executor (Qwen3.5-27B via vLLM + OpenHands) ---
     executor_model: str = "openai/Qwen/Qwen3.5-27B"
@@ -86,7 +90,12 @@ class Config:
     adherence_judge_model: str = "Qwen/Qwen3.5-27B"
     adherence_judge_base_url: str = "http://localhost:8001/v1"
     adherence_max_traj_chars: int = 16000
-    adherence_concurrency: int = 64
+    judge_parallel: int = 64            # Max concurrent adherence-judge chat
+                                        # completions against the local vLLM.
+                                        # Sibling of planner_parallel and
+                                        # executor_parallel; naming is
+                                        # intentionally uniform across the
+                                        # three concurrency layers.
     reflection_max_tokens: int = 8192   # Qwen3.5-27B emits a long CoT ("Thinking Process:") before
                                         # producing the final <adherence>/<insight> tags; we keep
                                         # thinking mode ON and give the budget to fit it.

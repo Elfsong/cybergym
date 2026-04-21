@@ -53,7 +53,7 @@ Round 1 starts with an empty archive, so `retrieve()` returns `[]` for every tas
 | `adherence_judge_base_url` | `http://localhost:8001/v1` | The same vLLM instance as the executor; runs during the scoring phase when the executor is idle. |
 | `reflection_max_tokens` | 8192 | Qwen3.5-27B's "Thinking Process" consumes ~5k tokens before it emits the final XML tags; 8192 leaves headroom. |
 | `adherence_max_traj_chars` | 8000 | The trajectory summary fed to the judge. Full trajectories are too long; the summarizer keeps first/last assistant messages, all `submit.sh` calls + responses, file reads / edits, and `think` actions. |
-| `adherence_concurrency` | 64 | Async semaphore to bound concurrent judge calls (matches vLLM's `max_num_seqs`). |
+| `judge_parallel` | 64 | Async semaphore bounding concurrent adherence-judge calls (matches vLLM's `max_num_seqs`). Sibling of `planner_parallel` / `executor_parallel`. |
 
 ## Ablations we care about
 

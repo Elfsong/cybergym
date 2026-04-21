@@ -183,7 +183,7 @@ async def run_round(
         results,
         base_url=config.adherence_judge_base_url,
         model=config.adherence_judge_model,
-        concurrency=config.adherence_concurrency,
+        concurrency=config.judge_parallel,
         max_traj_chars=config.adherence_max_traj_chars,
         max_tokens=config.reflection_max_tokens,
         insight_max_tokens=config.insight_max_tokens,
@@ -487,6 +487,18 @@ def main() -> None:
                         help="Target length cap of the <insight> payload emitted by the "
                              "adherence judge (default 500). Baked into the judge prompt "
                              "and enforced as a post-hoc char truncate safety net.")
+    parser.add_argument("--planner-parallel", type=int, default=None,
+                        help="Max concurrent Tinker sample_async calls during "
+                             "strategy generation (default 64). Independent of "
+                             "--executor-parallel: the planner talks to the Tinker "
+                             "cloud service while the executor runs local OpenHands "
+                             "subprocesses against vLLM, so the two fabrics scale "
+                             "along different axes and are capped separately.")
+    parser.add_argument("--judge-parallel", type=int, default=None,
+                        help="Max concurrent adherence-judge chat-completion "
+                             "calls to the local vLLM (default 64). Sibling of "
+                             "--planner-parallel and --executor-parallel; naming "
+                             "is intentionally uniform across the three layers.")
     parser.add_argument("--executor-parallel", type=int, default=None)
     parser.add_argument("--executor-model", type=str, default=None)
     parser.add_argument("--executor-base-url", type=str, default=None)
@@ -523,6 +535,10 @@ def main() -> None:
         config.strategy_top_p = args.strategy_top_p
     if args.tasks_file is not None:
         config.tasks_file = args.tasks_file
+    if args.planner_parallel is not None:
+        config.planner_parallel = args.planner_parallel
+    if args.judge_parallel is not None:
+        config.judge_parallel = args.judge_parallel
     if args.executor_parallel is not None:
         config.executor_parallel = args.executor_parallel
     if args.executor_model is not None:

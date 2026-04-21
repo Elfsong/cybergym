@@ -240,15 +240,27 @@ class Planner:
                 prompt = self._build_planner_prompt(task, priors)
                 jobs.append((task, g, prompt, priors))
 
-        coros = [
-            sampling_client.sample_async(
-                prompt=prompt,
-                num_samples=1,
-                sampling_params=self.sampling_params,
-            )
-            for _, _, prompt, _ in jobs
-        ]
-        sample_results = await asyncio.gather(*coros)
+        # Cap concurrent Tinker sample_async calls at config.planner_parallel.
+        # A naive asyncio.gather over K*B coroutines fires all K*B requests
+        # simultaneously (e.g., 768 when K=16, B=48), which both wastes local
+        # memory on held-open tasks and gives Tinker no useful back-pressure
+        # when it is slow. This is a separate knob from config.executor_parallel
+        # (OpenHands subprocess budget) because the two layers hit different
+        # services (Tinker cloud sampling vs local vLLM executor) and scale
+        # along different axes.
+        sem = asyncio.Semaphore(max(1, self.config.planner_parallel))
+
+        async def _sample_one(prompt):
+            async with sem:
+                return await sampling_client.sample_async(
+                    prompt=prompt,
+                    num_samples=1,
+                    sampling_params=self.sampling_params,
+                )
+
+        sample_results = await asyncio.gather(
+            *(_sample_one(prompt) for _, _, prompt, _ in jobs)
+        )
 
         strategies: list[StrategyToExecute] = []
         for (task, g, prompt, priors), sample_result in zip(jobs, sample_results):
