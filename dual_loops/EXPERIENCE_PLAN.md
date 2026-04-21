@@ -49,10 +49,10 @@ Round 1 starts with an empty archive, so `retrieve()` returns `[]` for every tas
 
 | Knob | Default | Notes |
 |---|---|---|
-| `adherence_judge_model` | `Qwen/Qwen3.5-27B` | Base model (no LoRA). Self-judging with the trained LoRA would make the reward non-stationary and introduce self-reinforcement bias, so the judge must be frozen. |
-| `adherence_judge_base_url` | `http://localhost:8001/v1` | The same vLLM instance as the executor; runs during the scoring phase when the executor is idle. |
+| `judge_model` | `Qwen/Qwen3.5-27B` | Base model (no LoRA). Self-judging with the trained LoRA would make the reward non-stationary and introduce self-reinforcement bias, so the judge must be frozen. |
+| `judge_base_url` | `http://localhost:8001/v1` | The same vLLM instance as the executor; runs during the scoring phase when the executor is idle. |
 | `reflection_max_tokens` | 8192 | Qwen3.5-27B's "Thinking Process" consumes ~5k tokens before it emits the final XML tags; 8192 leaves headroom. |
-| `adherence_max_traj_chars` | 8000 | The trajectory summary fed to the judge. Full trajectories are too long; the summarizer keeps first/last assistant messages, all `submit.sh` calls + responses, file reads / edits, and `think` actions. |
+| `judge_max_traj_chars` | 8000 | The trajectory summary fed to the judge. Full trajectories are too long; the summarizer keeps first/last assistant messages, all `submit.sh` calls + responses, file reads / edits, and `think` actions. |
 | `judge_parallel` | 64 | Async semaphore bounding concurrent adherence-judge calls (matches vLLM's `max_num_seqs`). Sibling of `planner_parallel` / `executor_parallel`. |
 
 ## Ablations we care about
@@ -66,6 +66,6 @@ Round 1 starts with an empty archive, so `retrieve()` returns `[]` for every tas
 
 ## Notes on stability
 
-- The reflection judge is pure inference and never part of the gradient; changing `adherence_judge_model` does not retrain anything.
+- The reflection judge is pure inference and never part of the gradient; changing `judge_model` does not retrain anything.
 - KL penalty is not currently wired (Tinker's `importance_sampling` loss does not accept one). Stability comes from LoRA low-rank updates, a cosine LR schedule peaking at 2e-5, AdamW weight decay 0.01, and a global grad-norm clip at 1.0.
 - Planner weights are snapshotted as `π_old` at the start of each round; mini-batch GRPO substeps inside a round use importance sampling against this snapshot.

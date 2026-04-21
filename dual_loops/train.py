@@ -188,11 +188,12 @@ async def run_round(
     t_adh = time.monotonic()
     pairs = await score_reflection_batch(
         results,
-        base_url=config.adherence_judge_base_url,
-        model=config.adherence_judge_model,
+        base_url=config.judge_base_url,
+        model=config.judge_model,
         concurrency=config.judge_parallel,
-        max_traj_chars=config.adherence_max_traj_chars,
+        max_traj_chars=config.judge_max_traj_chars,
         max_tokens=config.reflection_max_tokens,
+        api_key=config.judge_api_key,
         insight_max_tokens=config.insight_max_tokens,
     )
     adherences = [a for a, _ in pairs]
@@ -372,7 +373,7 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
     logger.info(f"=== Policy Loop Training ===")
     logger.info(f"Run ID: {config.run_id}  Output: {config.output_dir}")
     logger.info(
-        f"Planner: {config.tinker_model} (LoRA rank {config.tinker_rank})"
+        f"Planner: {config.planner_model} (LoRA rank {config.planner_rank})"
     )
     logger.info(f"Executor: {config.executor_model} at {config.executor_base_url}")
     logger.info(
@@ -382,7 +383,7 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
     )
     logger.info(
         f"Archive: {'ON' if config.archive_enabled else 'OFF'} | "
-        f"Reflection judge: {config.adherence_judge_model} @ {config.adherence_judge_base_url} | "
+        f"Reflection judge: {config.judge_model} @ {config.judge_base_url} | "
         f"λ={config.lambda_adherence}, γ_t={config.gamma_thinking}, γ_s={config.gamma_strategy}"
     )
     if start_round > 0:
@@ -517,7 +518,23 @@ def main() -> None:
                              "If unset, falls back to EXECUTOR_API_KEY > "
                              "DASHSCOPE_API_KEY > LLM_API_KEY env vars.")
     parser.add_argument("--executor-timeout", type=int, default=None)
-    parser.add_argument("--tinker-api-key", type=str, default=None)
+    parser.add_argument("--planner-base-url", type=str, default=None,
+                        help="Override the Tinker service base URL (default: "
+                             "SDK-resolved from TINKER_BASE_URL env var or "
+                             "https://tinker.thinkingmachines.dev/services/tinker-prod). "
+                             "Rarely needed outside dev/staging.")
+    parser.add_argument("--planner-api-key", type=str, default=None,
+                        help="Tinker API key (formerly --tinker-api-key).")
+    parser.add_argument("--judge-model", type=str, default=None,
+                        help="Adherence judge model. Must NOT be the LoRA planner "
+                             "(self-judging breaks the reward). Default: frozen "
+                             "Qwen3.5-27B co-hosted with the executor.")
+    parser.add_argument("--judge-base-url", type=str, default=None,
+                        help="Base URL for the judge's OpenAI-compatible endpoint "
+                             "(default: same local vLLM as executor).")
+    parser.add_argument("--judge-api-key", type=str, default=None,
+                        help="API key for the judge endpoint (default 'EMPTY' "
+                             "for local vLLM; pass real key for a remote judge).")
     parser.add_argument("--cybergym-api-key", type=str, default=None)
     parser.add_argument("--mini-batch-size", type=int, default=None,
                         help="Task groups per GRPO mini-batch. Substeps per round are "
@@ -563,8 +580,16 @@ def main() -> None:
         config.executor_api_key = args.executor_api_key
     if args.executor_timeout is not None:
         config.executor_timeout = args.executor_timeout
-    if args.tinker_api_key is not None:
-        config.tinker_api_key = args.tinker_api_key
+    if args.planner_base_url is not None:
+        config.planner_base_url = args.planner_base_url
+    if args.planner_api_key is not None:
+        config.planner_api_key = args.planner_api_key
+    if args.judge_model is not None:
+        config.judge_model = args.judge_model
+    if args.judge_base_url is not None:
+        config.judge_base_url = args.judge_base_url
+    if args.judge_api_key is not None:
+        config.judge_api_key = args.judge_api_key
     if args.cybergym_api_key is not None:
         config.cybergym_api_key = args.cybergym_api_key
     if args.no_archive:

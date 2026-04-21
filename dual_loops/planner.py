@@ -154,17 +154,19 @@ class Planner:
     async def init(self) -> None:
         """Create the Tinker LoRA training client and renderers."""
         kwargs = {}
-        if self.config.tinker_api_key:
-            kwargs["api_key"] = self.config.tinker_api_key
+        if self.config.planner_api_key:
+            kwargs["api_key"] = self.config.planner_api_key
+        if self.config.planner_base_url:
+            kwargs["base_url"] = self.config.planner_base_url
         self.service_client = tinker.ServiceClient(**kwargs)
         self.training_client = (
             await self.service_client.create_lora_training_client_async(
-                base_model=self.config.tinker_model,
-                rank=self.config.tinker_rank,
+                base_model=self.config.planner_model,
+                rank=self.config.planner_rank,
             )
         )
         self.tokenizer = self.training_client.get_tokenizer()
-        renderer_name = model_info.get_recommended_renderer_name(self.config.tinker_model)
+        renderer_name = model_info.get_recommended_renderer_name(self.config.planner_model)
         self.renderer = get_renderer(renderer_name, self.tokenizer)
         # Pre-tokenize </think> marker for O(1) lookup during generation
         try:
@@ -182,7 +184,7 @@ class Planner:
         # the params per substep in grpo_update.
         self.adam_params = self._adam_params_at_lr(self.config.learning_rate)
         logger.info(
-            f"Planner ready: {self.config.tinker_model} LoRA rank={self.config.tinker_rank}"
+            f"Planner ready: {self.config.planner_model} LoRA rank={self.config.planner_rank}"
         )
 
     def _build_planner_prompt(self, task: Task, priors: list[tuple[str, int]]):
@@ -710,7 +712,7 @@ class Planner:
             # Rebuild tokenizer + renderer (new training client)
             self.tokenizer = self.training_client.get_tokenizer()
             renderer_name = model_info.get_recommended_renderer_name(
-                self.config.tinker_model
+                self.config.planner_model
             )
             from tinker_cookbook.renderers import get_renderer
             self.renderer = get_renderer(renderer_name, self.tokenizer)

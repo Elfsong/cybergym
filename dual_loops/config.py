@@ -12,37 +12,50 @@ PROJECT_DIR = Path(__file__).parent.parent
 
 @dataclass
 class Config:
-    # --- Tinker planner ---
-    tinker_model: str = "Qwen/Qwen3.5-27B"
-    tinker_rank: int = 32
-    tinker_api_key: str = field(default_factory=lambda: os.getenv("TINKER_API_KEY", ""))
-    planner_parallel: int = 64      # Max concurrent Tinker sample_async calls
-                                    # during strategy generation (K*B coroutines
-                                    # gathered per round; cap prevents the naive
-                                    # 768-way asyncio.gather when K=16, B=48).
+    # =========================================================================
+    # Role 1 — Planner  (Tinker managed LoRA service)
+    # =========================================================================
+    # Uses Tinker's SDK rather than an OpenAI-compatible HTTP endpoint, but
+    # still exposes the same (model, base_url, api_key) triplet as the other
+    # two roles — Tinker accepts an override base_url in the ServiceClient
+    # constructor (it also honors TINKER_BASE_URL env var and falls back to
+    # https://tinker.thinkingmachines.dev/services/tinker-prod when empty).
+    planner_model:    str = "Qwen/Qwen3.5-27B"
+    planner_rank:     int = 32
+    planner_base_url: str = ""      # Empty string → Tinker SDK default
+                                    # (https://tinker.thinkingmachines.dev/
+                                    #  services/tinker-prod). Override for
+                                    # dev/staging Tinker endpoints.
+    planner_api_key:  str = field(default_factory=lambda: os.getenv("TINKER_API_KEY", ""))
+    planner_parallel: int = 64      # Max concurrent sample_async calls during
+                                    # strategy generation (K*B coroutines
+                                    # gathered per round; cap prevents the
+                                    # naive 768-way asyncio.gather at K=16, B=48).
 
-    # --- Executor (OpenHands scaffold; vLLM or DashScope backend) ---
-    # Defaults target the local 8xA100 vLLM. To route the executor to
-    # DashScope instead, set at launch time:
+    # =========================================================================
+    # Role 2 — Executor  (OpenHands scaffold → OpenAI-compatible chat endpoint)
+    # =========================================================================
+    # Defaults target the local 8xA100 vLLM. The model/base_url/api_key triplet
+    # is written out explicitly: there is no env-var fallback chain, because
+    # inferring "which backend is this" from which env var happens to be set
+    # is brittle. To switch to DashScope:
+    #
     #   --executor-model     openai/qwen3.6-plus
     #   --executor-base-url  https://dashscope.aliyuncs.com/compatible-mode/v1
-    #   --executor-api-key   $DASHSCOPE_API_KEY
-    # (or drop DASHSCOPE_API_KEY into the environment and let the fallback
-    #  chain below pick it up.)
-    executor_model: str = "openai/Qwen/Qwen3.5-27B"
+    #   --executor-api-key   "$DASHSCOPE_API_KEY"
+    #
+    # For local vLLM the api_key field is a placeholder ("EMPTY") because
+    # vLLM does not validate it — but LiteLLM requires the header to be
+    # present, so we must set something.
+    executor_model:    str = "openai/Qwen/Qwen3.5-27B"
     executor_base_url: str = "http://localhost:8001/v1"
-    executor_api_key: str = field(default_factory=lambda: (
-        os.getenv("EXECUTOR_API_KEY")
-        or os.getenv("DASHSCOPE_API_KEY")
-        or os.getenv("LLM_API_KEY")
-        or "EMPTY"
-    ))
+    executor_api_key:  str = "EMPTY"
     executor_parallel: int = 64
-    executor_timeout: int = 2400
+    executor_timeout:  int = 2400
     executor_max_iter: int = 72
     executor_max_output_tokens: int = 8192
     executor_temperature: float = 0.7  # paper says OpenHands default = 0.7
-    executor_difficulty: str = "level1"
+    executor_difficulty:  str = "level1"
 
     # --- GRPO training ---
     group_size: int = 16              # K rollouts per task (intra-group GRPO)
@@ -99,23 +112,30 @@ class Config:
     archive_tournament_size: int = 4
     archive_min_milestone: int = 3   # only retrieve strategies that submitted
 
-    # --- Reflection judge (adherence + insight) ---
-    adherence_judge_model: str = "Qwen/Qwen3.5-27B"
-    adherence_judge_base_url: str = "http://localhost:8001/v1"
-    adherence_max_traj_chars: int = 16000
-    judge_parallel: int = 64            # Max concurrent adherence-judge chat
-                                        # completions against the local vLLM.
-                                        # Sibling of planner_parallel and
-                                        # executor_parallel; naming is
-                                        # intentionally uniform across the
-                                        # three concurrency layers.
-    reflection_max_tokens: int = 8192   # Qwen3.5-27B emits a long CoT ("Thinking Process:") before
-                                        # producing the final <adherence>/<insight> tags; we keep
-                                        # thinking mode ON and give the budget to fit it.
-    insight_max_tokens: int = 500       # Target length of the <insight> payload itself
-                                        # (not the whole LLM response). Baked into the
-                                        # adherence-judge prompt as the advertised cap; a
-                                        # post-hoc char truncate enforces it as a safety net.
+    # =========================================================================
+    # Role 3 — Judge  (frozen base model → OpenAI-compatible chat endpoint)
+    # =========================================================================
+    # Scores each rollout's adherence + emits the insight stored in the
+    # archive. Defaults co-host on the same local vLLM as the executor (prompt
+    # caching benefits; one vLLM instance serves both roles). The model MUST
+    # NOT be the LoRA-adapted planner: self-judging introduces non-stationary
+    # reward signal and self-reinforcement bias. Override the triplet to point
+    # at a different vLLM or DashScope, same pattern as the executor section.
+    judge_model:    str = "Qwen/Qwen3.5-27B"
+    judge_base_url: str = "http://localhost:8001/v1"
+    judge_api_key:  str = "EMPTY"
+    judge_parallel: int = 64            # Max concurrent judge chat completions;
+                                        # sibling of planner_parallel and
+                                        # executor_parallel.
+    judge_max_traj_chars:   int = 16000 # Hard cap passed to summarize_trajectory
+                                        # before the summary is handed to the judge.
+    reflection_max_tokens:  int = 8192  # max_tokens for the judge's chat call;
+                                        # Qwen3.5-27B emits ~5k tokens of thinking
+                                        # before the final XML tags.
+    insight_max_tokens:     int = 500   # Target length of the <insight> payload
+                                        # itself (not the whole LLM response).
+                                        # Baked into the prompt + post-hoc char
+                                        # truncate safety net.
 
     # --- Paths ---
     data_dir: Path = Path("/data/cybergym_data/cybergym-benchmark-data/data")
