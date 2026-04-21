@@ -58,7 +58,7 @@ class Config:
     executor_difficulty:  str = "level1"
 
     # --- GRPO training ---
-    group_size: int = 16              # K rollouts per task (intra-group GRPO)
+    group_size: int = 8               # K rollouts per task (intra-group GRPO)
     batch_size: int = 48             # tasks per round (task groups per round)
     mini_batch_size: int = 8         # task groups per GRPO mini-batch.
                                      # Substeps per round are derived: S = ceil(batch_size / mini_batch_size).
