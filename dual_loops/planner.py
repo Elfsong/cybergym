@@ -76,15 +76,21 @@ class StrategyToExecute:
 
 
 def _split_thinking(text: str) -> tuple[str, str]:
-    """Split thinking content from strategy. Returns (strategy, thinking)."""
-    marker = "</think>"
-    idx = text.find(marker)
-    if idx >= 0:
-        thinking = text[:idx].strip()
-        strategy = text[idx + len(marker):].strip()
-        return strategy, thinking
-    # No </think> tag — check for "Thinking Process:" plain-text pattern
-    # (fallback for truncated outputs that never reached </think>)
+    """Split thinking content from strategy. Returns (strategy, thinking).
+
+    Primary marker is ``</think>``. When Qwen3.5-27B's thinking mode fails
+    it sometimes emits the plain-text heading ``Thinking Process:`` instead
+    of a proper ``<think>…</think>`` block; detect that as a fallback so the
+    reasoning dump doesn't leak into the strategy field (observed ~0.05% of
+    rollouts, but each leak fills the full generation budget with repeated
+    safety-refusal loops).
+    """
+    for marker in ("</think>", "\nThinking Process:\n", "Thinking Process:\n"):
+        idx = text.find(marker)
+        if idx >= 0:
+            thinking = text[:idx].strip()
+            strategy = text[idx + len(marker):].strip()
+            return strategy, thinking
     return text, ""
 
 

@@ -1,8 +1,21 @@
 """Main iterative offline GRPO training loop.
 
 Usage:
+    # Default run (all config.py defaults)
     uv run python -m dual_loops.train
+
+    # Override common knobs
     uv run python -m dual_loops.train --num-rounds 3 --batch-size 10
+
+    # Ablate insight verbosity: shorter insights (lighter archive/prompt)
+    uv run python -m dual_loops.train --insight-max-tokens 150
+
+    # Ablate insight verbosity: richer insights (closer to V2 replay recipe,
+    # larger archive, larger planner prompt next round)
+    uv run python -m dual_loops.train --insight-max-tokens 1000
+
+    # Resume a previous run from its last completed round
+    uv run python -m dual_loops.train --resume-from /path/to/<run_id>
 
 Each round:
     1. Sample batch_size tasks
@@ -173,6 +186,7 @@ async def run_round(
         concurrency=config.adherence_concurrency,
         max_traj_chars=config.adherence_max_traj_chars,
         max_tokens=config.reflection_max_tokens,
+        insight_max_tokens=config.insight_max_tokens,
     )
     adherences = [a for a, _ in pairs]
     insights = [ins for _, ins in pairs]
@@ -469,6 +483,10 @@ def main() -> None:
                         help="Saturation threshold for f_think normalization (default 3000).")
     parser.add_argument("--strategy-ref-tokens", type=int, default=None,
                         help="Saturation threshold for f_strat normalization (default 500).")
+    parser.add_argument("--insight-max-tokens", type=int, default=None,
+                        help="Target length cap of the <insight> payload emitted by the "
+                             "adherence judge (default 500). Baked into the judge prompt "
+                             "and enforced as a post-hoc char truncate safety net.")
     parser.add_argument("--executor-parallel", type=int, default=None)
     parser.add_argument("--executor-model", type=str, default=None)
     parser.add_argument("--executor-base-url", type=str, default=None)
@@ -529,6 +547,8 @@ def main() -> None:
         config.thinking_ref_tokens = args.thinking_ref_tokens
     if args.strategy_ref_tokens is not None:
         config.strategy_ref_tokens = args.strategy_ref_tokens
+    if args.insight_max_tokens is not None:
+        config.insight_max_tokens = args.insight_max_tokens
 
     asyncio.run(train(config, resume_from=args.resume_from))
 

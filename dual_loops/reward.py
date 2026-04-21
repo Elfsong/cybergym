@@ -591,13 +591,36 @@ def summarize_trajectory(traj_path: Path | str, max_chars: int = 16000) -> str:
     return summary
 
 
-def _build_adherence_user_content(strategy: str, trajectory_summary: str) -> str:
+def _build_adherence_user_content(
+    strategy: str,
+    trajectory_summary: str,
+    insight_max_tokens: int = 500,
+) -> str:
     # str.replace is safe with curly braces in the payload (str.format is not).
     return (
         ADHERENCE_JUDGE_PROMPT
         .replace("{strategy}", strategy)
         .replace("{trajectory_summary}", trajectory_summary)
+        .replace("{insight_max_tokens}", str(insight_max_tokens))
     )
+
+
+def _truncate_insight(text: str, max_tokens: int) -> str:
+    """Safety-net truncation: the judge is instructed to keep insight within
+    ``insight_max_tokens`` but sometimes overshoots. We use a coarse
+    4-chars-per-token heuristic (Qwen tokenizer averages ~3.5-4.5 chars/token
+    on English security text) and truncate at the nearest whitespace if we
+    need to cut.
+    """
+    if not text or max_tokens <= 0:
+        return text
+    cap_chars = max_tokens * 4
+    if len(text) <= cap_chars:
+        return text
+    cut = text.rfind(" ", 0, cap_chars)
+    if cut < cap_chars * 3 // 4:
+        cut = cap_chars
+    return text[:cut].rstrip() + " [...truncated]"
 
 
 #: Sentinel returned by `_parse_reflection` when the judge output can't be
@@ -697,8 +720,11 @@ async def _judge_one(
     trajectory_summary: str,
     semaphore: asyncio.Semaphore,
     max_tokens: int,
+    insight_max_tokens: int = 500,
 ) -> tuple[float, str]:
-    user_content = _build_adherence_user_content(strategy, trajectory_summary)
+    user_content = _build_adherence_user_content(
+        strategy, trajectory_summary, insight_max_tokens=insight_max_tokens,
+    )
     async with semaphore:
         try:
             resp = await client.chat.completions.create(
@@ -711,7 +737,9 @@ async def _judge_one(
             logger.warning(f"reflection judge call failed: {e}")
             return _PARSE_FAILED_ADH, _PARSE_FAILED_INSIGHT_SENTINEL
     content = (resp.choices[0].message.content or "") if resp.choices else ""
-    return _parse_reflection(content)
+    adh, insight = _parse_reflection(content)
+    insight = _truncate_insight(insight, insight_max_tokens)
+    return adh, insight
 
 
 async def score_reflection_batch(
@@ -722,6 +750,7 @@ async def score_reflection_batch(
     max_traj_chars: int = 16000,
     max_tokens: int = 8192,
     api_key: str = "EMPTY",
+    insight_max_tokens: int = 500,
 ) -> list[tuple[float, str]]:
     """For each ExecutionResult, return (adherence in [0,1], insight_text).
     Order matches input. Rollouts with no trajectory → (_PARSE_FAILED_ADH, "").
@@ -740,7 +769,10 @@ async def score_reflection_batch(
         if r.trajectory_path is None:
             return _PARSE_FAILED_ADH, _PARSE_FAILED_INSIGHT_SENTINEL
         summary = summarize_trajectory(r.trajectory_path, max_chars=max_traj_chars)
-        return await _judge_one(client, model, r.strategy.strategy, summary, sem, max_tokens)
+        return await _judge_one(
+            client, model, r.strategy.strategy, summary, sem, max_tokens,
+            insight_max_tokens=insight_max_tokens,
+        )
 
     out = await asyncio.gather(*[_one(r) for r in results])
     try:

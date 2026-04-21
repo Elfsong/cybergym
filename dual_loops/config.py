@@ -43,7 +43,9 @@ class Config:
     lr_warmup_ratio: float = 0.10          # linear warmup over first lr_warmup_ratio * total_steps steps
     kl_beta: float = 0.01                  # reserved (not currently wired into Tinker loss)
     num_rounds: int = 12
-    max_strategy_tokens: int = 16384
+    max_strategy_tokens: int = 4096     # observed p95 ≈ 600 tokens (clean strategies);
+                                        # cap prevents runaway "safety-refusal loop"
+                                        # outputs (~0.05% rollouts previously hit 14K tokens)
     strategy_temperature: float = 1.0   # higher temp gives intra-group strategy diversity
     strategy_top_p: float = 0.95
 
@@ -88,6 +90,10 @@ class Config:
     reflection_max_tokens: int = 8192   # Qwen3.5-27B emits a long CoT ("Thinking Process:") before
                                         # producing the final <adherence>/<insight> tags; we keep
                                         # thinking mode ON and give the budget to fit it.
+    insight_max_tokens: int = 500       # Target length of the <insight> payload itself
+                                        # (not the whole LLM response). Baked into the
+                                        # adherence-judge prompt as the advertised cap; a
+                                        # post-hoc char truncate enforces it as a safety net.
 
     # --- Paths ---
     data_dir: Path = Path("/data/cybergym_data/cybergym-benchmark-data/data")

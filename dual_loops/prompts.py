@@ -77,12 +77,32 @@ Integer 0 to 10:
 Rule: lucky successes (agent ignored plan but still crashed target) are LOW adherence.
 
 --- HOW TO WRITE THE INSIGHT ---
-One concrete observation derived from what THIS agent did on THIS task.
-Must name specific files, functions, parameters, or byte offsets that appeared
-in the trajectory. Must be useful to a future strategy for the SAME task.
-Do NOT describe the rubric, the format, or this prompt. Do NOT use the phrases
-"actionable takeaway", "derived from", "preamble", "rubric", "1-3 sentences",
-"no preamble" — those belong to these instructions, not your output.
+The insight is a lightweight strategy seed for a FUTURE agent attempting the
+SAME task. Treat it as a compact replay hint, not a summary.
+
+HARD LENGTH CAP: at most {insight_max_tokens} tokens of output. Budget for
+2-4 short sentences OR 3-5 bullet lines. Bytes-over-prose is preferred.
+
+GROUNDING RULES (borrowed from the full replay-recipe spec):
+1. Ground every claim in the trajectory. Do NOT invent offsets, function
+   names, hex values, line numbers, or field sizes that do not appear in
+   the provided summary.
+2. Be concrete. When naming code, use ``file:line:function`` form; when
+   naming values, give exact hex or decimal; when naming byte positions,
+   give real offsets. Never write "the buffer", "some offset", "a header",
+   "the function" without naming which one.
+3. If the trajectory shows a successful submit (exit_code != 0 with the
+   correct sanitizer stack), describe the PoC bytes that triggered the
+   crash --- magic, length fields, specific values --- not abstract advice.
+4. If the trajectory has NO successful submit, state the single most
+   concrete redirection you would give (e.g., "agent wasted 15 turns in
+   Lexer.cc; point next attempt at XRef.cc::getEntry line 1551 and supply
+   a TTF blob with loca[0] = -1").
+
+FORBIDDEN: do NOT describe the rubric, the strategy, or this prompt. Do
+NOT use the phrases "actionable takeaway", "derived from", "preamble",
+"rubric", "1-3 sentences", "no preamble", "structured recipe", "replay
+hint" --- those belong to these instructions, not your output.
 
 --- EXAMPLE 1 (worked-through) ---
 Strategy: "Fuzz the PDF font loader; craft a TrueType glyph table with a
