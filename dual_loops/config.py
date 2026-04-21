@@ -17,37 +17,57 @@ class Config:
     tinker_rank: int = 32
     tinker_api_key: str = field(default_factory=lambda: os.getenv("TINKER_API_KEY", ""))
 
-    # --- Executor (MiniMax via vLLM + OpenHands) ---
-    executor_model: str = "openai/MiniMaxAI/MiniMax-M2.5"
-    executor_base_url: str = "http://localhost:8000/v1"
+    # --- Executor (Qwen3.5-27B via vLLM + OpenHands) ---
+    executor_model: str = "openai/Qwen/Qwen3.5-27B"
+    executor_base_url: str = "http://localhost:8001/v1"
     executor_parallel: int = 64
-    executor_timeout: int = 1800
+    executor_timeout: int = 2400
     executor_max_iter: int = 72
     executor_max_output_tokens: int = 8192
+    executor_temperature: float = 0.7  # paper says OpenHands default = 0.7
     executor_difficulty: str = "level1"
 
     # --- GRPO training ---
-    group_size: int = 8
+    group_size: int = 16              # K rollouts per task (intra-group GRPO)
     batch_size: int = 48             # tasks per round (task groups per round)
     mini_batch_size: int = 8         # task groups per GRPO mini-batch.
                                      # Substeps per round are derived: S = ceil(batch_size / mini_batch_size).
     grad_accum: int = 4
-    learning_rate: float = 2e-5           # peak LR (also the constant LR when lr_schedule="constant")
+    learning_rate: float = 1e-5           # peak LR (also the constant LR when lr_schedule="constant")
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
     adam_weight_decay: float = 0.01        # AdamW weight decay (Tinker default is 0.0)
     grad_clip_norm: float = 1.0            # global grad-norm clip (Tinker default is 0.0 = disabled)
     lr_schedule: str = "cosine"            # {"constant", "cosine"}
     lr_min_ratio: float = 0.1              # cosine floor: min_lr = learning_rate * lr_min_ratio
-    lr_warmup_ratio: float = 0.05          # linear warmup over first lr_warmup_ratio * total_steps steps
+    lr_warmup_ratio: float = 0.10          # linear warmup over first lr_warmup_ratio * total_steps steps
     kl_beta: float = 0.01                  # reserved (not currently wired into Tinker loss)
     num_rounds: int = 12
     max_strategy_tokens: int = 16384
     strategy_temperature: float = 1.0   # higher temp gives intra-group strategy diversity
     strategy_top_p: float = 0.95
 
+    # --- Loss function (PPO-clip via Tinker) ---
+    # Tinker supports {"importance_sampling", "ppo", "cispo", "dro"}.
+    # "ppo" adds ratio clipping; required once sub-steps per round push the
+    # policy off the sampling distribution.
+    loss_fn_name: str = "ppo"
+    ppo_clip_low_threshold: float = 0.2    # ε_low, passed to loss_fn_config
+    ppo_clip_high_threshold: float = 0.2   # ε_high, passed to loss_fn_config
+
+    # --- Advantage normalization (GRPO) ---
+    # "mean_std":    (r - μ) / (σ + eps)  — classic, noisy in small groups
+    # "mean_only":   r - μ                 — Dr.GRPO; removes σ-driven variance
+    # "clipped_std": (r - μ) / max(σ, floor) — compromise
+    advantage_normalization: str = "mean_only"
+    advantage_std_floor: float = 0.3
+
     # --- Reward (milestone 0-7 → reward value) ---
     milestone_rewards: tuple = (0.0, 0.5, 1.5, 2.5, 4.0, 5.5, 8.0, 12.0)
+    # Compression applied to r_milestone BEFORE the adherence multiplier.
+    # "none" | "log1p" (→ 0..2.56) | "sqrt" (→ 0..3.46). Reduces milestone=7
+    # outlier dominance of intra-group advantages.
+    reward_compression: str = "log1p"
     lambda_adherence: float = 0.5    # adherence-bonus weight in the composite reward
     gamma_thinking: float = 0.0      # reward weight on f_think = min(n_think/ref, 1)
     gamma_strategy: float = 0.0      # reward weight on f_strat = min(n_strat/ref, 1)
@@ -63,7 +83,7 @@ class Config:
     # --- Reflection judge (adherence + insight) ---
     adherence_judge_model: str = "Qwen/Qwen3.5-27B"
     adherence_judge_base_url: str = "http://localhost:8001/v1"
-    adherence_max_traj_chars: int = 8000
+    adherence_max_traj_chars: int = 16000
     adherence_concurrency: int = 64
     reflection_max_tokens: int = 8192   # Qwen3.5-27B emits a long CoT ("Thinking Process:") before
                                         # producing the final <adherence>/<insight> tags; we keep
@@ -72,6 +92,12 @@ class Config:
     # --- Paths ---
     data_dir: Path = Path("/data/cybergym_data/cybergym-benchmark-data/data")
     train_root: Path = Path("/data/cybergym_data/cybergym-train-data")
+    # Shared experience pool seeded into every new run's Archive so training
+    # doesn't cold-start. Set to None to disable. Per-run archives still write
+    # only to their own output_dir; promote merged runs into this path manually.
+    global_archive_path: Path | None = Path(
+        "/data/cybergym_data/cybergym-train-data/_global/archive.jsonl"
+    )
     tasks_file: Path = PROJECT_DIR / "TASKS_TRAIN"
     server: str = "http://172.17.0.1:8666"
     cybergym_api_key: str = field(default_factory=lambda: os.getenv(

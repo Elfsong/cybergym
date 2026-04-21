@@ -26,6 +26,14 @@
         "Qwen/Qwen3.5-27B": {
             "input": 1.24, "output": 3.73, "train": 3.73
         },
+        "qwen3.5-27b": {
+            "_source": "DashScope 0-128K tier; 128K-256K triples to input $0.250 / output $2.000",
+            "input": 0.083, "output": 0.667
+        },
+        "qwen3.6-max-preview": {
+            "_source": "DashScope preview SKU; pricing not yet published — placeholder 0",
+            "input": 0.0, "output": 0.0
+        },
         "Qwen/Qwen3.5-4B": {
             "input": 0.22, "output": 0.67, "train": 0.67
         },

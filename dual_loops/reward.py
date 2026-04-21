@@ -425,12 +425,56 @@ _INS_RE = re.compile(r"<insight>\s*(.*?)\s*</insight>", re.IGNORECASE | re.DOTAL
 _ADH_SCALE_MAX = 10
 
 
-def summarize_trajectory(traj_path: Path | str, max_chars: int = 8000) -> str:
+_SUBMIT_PATH_RE = re.compile(r"submit\.sh\s+(\S+)")
+_REDIRECT_TARGET_RE = re.compile(r"(?:>>?|\btee\b\s+(?:-a\s+)?)\s*([^\s;&|]+)")
+
+
+def _extract_submit_targets(data: list) -> set[str]:
+    """Paths passed as the PoC argument to bash /workspace/submit.sh."""
+    targets: set[str] = set()
+    for e in data:
+        if e.get("source") != "agent" or e.get("action") != "run":
+            continue
+        cmd = str((e.get("args") or {}).get("command") or "")
+        if "submit.sh" not in cmd or cmd.lstrip().startswith("cat"):
+            continue
+        for m in _SUBMIT_PATH_RE.finditer(cmd):
+            tok = m.group(1).strip(" ;&|")
+            if tok and "submit.sh" not in tok:
+                targets.add(tok)
+    return targets
+
+
+def _cmd_writes_to_poc(cmd: str, submit_targets: set[str]) -> bool:
+    """True iff cmd looks like a PoC-construction command: it redirects
+    into a file, AND the target (or a literal mention of any submit target,
+    or 'poc' in the path) suggests it builds the payload."""
+    if "submit.sh" in cmd:
+        return False
+    redirects = _REDIRECT_TARGET_RE.findall(cmd)
+    if not redirects:
+        return False
+    targets_lower = [t.lower() for t in redirects]
+    if any(t in submit_targets for t in redirects):
+        return True
+    if any("poc" in t for t in targets_lower):
+        return True
+    # Any submit target path substring appearing anywhere in the command
+    if submit_targets and any(t in cmd for t in submit_targets):
+        return True
+    return False
+
+
+def summarize_trajectory(traj_path: Path | str, max_chars: int = 16000) -> str:
     """Compress an OpenHands trajectory to ≤ max_chars for the judge.
 
     Extracts:
       - First 3 and last 3 assistant messages
-      - All submit.sh invocations + server response previews
+      - PoC construction: edit/write content and run-command heredocs/
+        redirects that target the submitted PoC path (so the judge sees
+        what bytes were actually fed to the fuzzer)
+      - All submit.sh invocations + server response previews (≤1500 chars
+        each, enough to cover an ASan stack frame or fuzzer error log)
       - File reads / edits (paths only)
       - Agent `think` actions (thought content, truncated)
     """
@@ -440,11 +484,14 @@ def summarize_trajectory(traj_path: Path | str, max_chars: int = 8000) -> str:
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return "(trajectory unavailable)"
 
+    submit_targets = _extract_submit_targets(data)
+
     assistant_msgs: list[str] = []
     submits: list[str] = []
     reads: list[str] = []
     edits: list[str] = []
     thinks: list[str] = []
+    poc_artifacts: list[str] = []
 
     for i, e in enumerate(data):
         action = e.get("action")
@@ -458,21 +505,49 @@ def summarize_trajectory(traj_path: Path | str, max_chars: int = 8000) -> str:
 
         if source == "agent" and action == "run":
             cmd = str(args.get("command") or "")
-            if "submit.sh" in cmd and "cat" not in cmd:
+            if "submit.sh" in cmd and not cmd.lstrip().startswith("cat"):
                 resp_preview = ""
                 if i + 1 < len(data):
-                    resp_preview = str(data[i + 1].get("content") or "")[:200]
+                    resp_preview = str(data[i + 1].get("content") or "")[:1500]
                 submits.append(f"$ {cmd[:120]}\n  → {resp_preview}")
+            elif _cmd_writes_to_poc(cmd, submit_targets):
+                poc_artifacts.append(f"$ {cmd[:800]}")
+
+        # run_ipython: agents often build the PoC with a Python script executed
+        # inline (import struct; zlib.crc32; write bytes to /workspace/poc.*).
+        # The `code` arg has the full construction logic; the next observation
+        # typically echoes a hex dump / "File saved to ..." confirmation.
+        if source == "agent" and action == "run_ipython":
+            code = str(args.get("code") or "")
+            mentions_poc = (
+                any(t in code for t in submit_targets)
+                or "poc" in code.lower()
+                or "submit.sh" in code
+            )
+            if mentions_poc:
+                snippet = code[:800]
+                obs_preview = ""
+                if i + 1 < len(data):
+                    obs_preview = str(data[i + 1].get("content") or "")[:400]
+                block = f"$ python3 <<EOF\n{snippet}\nEOF"
+                if obs_preview:
+                    block += f"\n  → {obs_preview}"
+                poc_artifacts.append(block)
 
         if source == "agent" and action == "read":
             path = str(args.get("path") or "")
             if path:
                 reads.append(path)
 
-        if source == "agent" and action == "edit":
+        if source == "agent" and action in ("edit", "write"):
             path = str(args.get("path") or "")
             if path:
                 edits.append(path)
+            if path and (path in submit_targets or "poc" in path.lower()):
+                content = args.get("content") or args.get("file_text") or ""
+                if content:
+                    preview = repr(content[:400])
+                    poc_artifacts.append(f"{path}:\n  {preview}")
 
         if source == "agent" and action == "think":
             thought = str(args.get("thought") or "").strip()
@@ -487,6 +562,10 @@ def summarize_trajectory(traj_path: Path | str, max_chars: int = 8000) -> str:
         sections.append("### First assistant messages\n" + "\n---\n".join(first))
         if last and last != first:
             sections.append("### Last assistant messages\n" + "\n---\n".join(last))
+
+    if poc_artifacts:
+        sections.append("### PoC construction (what bytes the agent fed the fuzzer)\n"
+                        + "\n\n".join(poc_artifacts[:5]))
 
     if submits:
         sections.append("### Submit attempts (" + str(len(submits)) + ")\n"
@@ -521,24 +600,87 @@ def _build_adherence_user_content(strategy: str, trajectory_summary: str) -> str
     )
 
 
+#: Sentinel returned by `_parse_reflection` when the judge output can't be
+#: parsed. We use NaN so the caller can detect parse failures explicitly and
+#: decide the right fallback (e.g. impute with the batch-mean adherence, or
+#: drop the rollout from GRPO). Using a fixed constant like 0.0 or 0.5 either
+#: kills the reward signal or artificially inflates parse-failed rollouts
+#: above the actual observed adherence distribution (~0.30-0.36).
+import math
+_PARSE_FAILED_ADH = math.nan
+_PARSE_FAILED_INSIGHT_SENTINEL = ""  # empty string marks "no usable insight"
+
+
 def _parse_reflection(text: str) -> tuple[float, str]:
     """Parse <adherence>N</adherence> and <insight>TEXT</insight> from judge output.
 
-    Returns (adherence in [0,1], insight_text). On parse failure, returns (0.0, "").
+    Returns (adherence in [0,1], insight_text). On parse failure returns
+    (NaN, ""). The caller (`score_reflection_batch`) replaces NaN entries
+    with the batch-mean of successful parses; if the whole batch fails the
+    fallback is 1.0 (bare milestone reward, no adherence gating).
     Both tags are required to be present; missing either → fallback values for both.
     """
     if not text:
-        return 0.0, ""
+        return _PARSE_FAILED_ADH, _PARSE_FAILED_INSIGHT_SENTINEL
+    # Qwen3.5-27B emits a thinking preamble that mentions `<insight>` verbatim
+    # while describing the rubric. That makes `<insight>` appear 2-3 times in
+    # the output with only one real `</insight>` at the end, so a naive
+    # non-greedy search captures the whole thinking block as the insight.
+    # Strip everything up to the last `</think>` to land on the final tags.
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[-1]
     adh_m = _ADH_RE.search(text)
     ins_m = _INS_RE.search(text)
     if adh_m is None or ins_m is None:
-        return 0.0, ""
+        return _PARSE_FAILED_ADH, _PARSE_FAILED_INSIGHT_SENTINEL
     try:
         score = int(adh_m.group(1))
     except ValueError:
-        return 0.0, ""
+        return _PARSE_FAILED_ADH, _PARSE_FAILED_INSIGHT_SENTINEL
     score = max(0, min(_ADH_SCALE_MAX, score))
     insight = ins_m.group(1).strip()
+    # Reject placeholders AND "prompt-echo" outputs where the judge parrots
+    # back the rubric/instruction text instead of writing a real insight.
+    placeholder_markers = (
+        "a short actionable takeaway",
+        "your_actionable_takeaway_text",
+        "your actionable takeaway",
+    )
+    prompt_echo_markers = (
+        "1-3 sentences actionable takeaway",
+        "no preamble",
+        "adherence rubric",
+        "strict adherence",
+        "derived from the trajectory",
+        "your own content",
+        "replace integer_0_to_10",
+        "replace your_actionable",
+        # additional echoes observed on Qwen3.5-27B
+        "no extra text",
+        "no forbidden phrases",
+        "insight must name",
+        "evaluate adherence",
+        "**adherence",
+        "**insight",
+        "insight:** ",
+        "adherence:** ",
+        "## adherence",
+        "## insight",
+    )
+    low = insight.lower()
+    is_placeholder = not insight or low in placeholder_markers or any(
+        low.startswith(m) and len(insight) < 60 for m in placeholder_markers
+    )
+    is_prompt_echo = any(m in low for m in prompt_echo_markers)
+    # Also: if insight starts with meta-analysis markers (bullets, numbered steps)
+    # or markdown header syntax, it's the model producing its own analysis doc
+    # rather than the concrete 1-3 sentence insight we asked for.
+    is_analysis_dump = (
+        insight.startswith(("**", "## ", "1.", "1)", "- ", "* ", "`."))
+        or "analyze the" in low[:80]
+    )
+    if is_placeholder or is_prompt_echo or is_analysis_dump:
+        insight = ""
     return score / _ADH_SCALE_MAX, insight
 
 
@@ -567,7 +709,7 @@ async def _judge_one(
             )
         except Exception as e:
             logger.warning(f"reflection judge call failed: {e}")
-            return 0.0, ""
+            return _PARSE_FAILED_ADH, _PARSE_FAILED_INSIGHT_SENTINEL
     content = (resp.choices[0].message.content or "") if resp.choices else ""
     return _parse_reflection(content)
 
@@ -577,15 +719,17 @@ async def score_reflection_batch(
     base_url: str,
     model: str,
     concurrency: int = 64,
-    max_traj_chars: int = 8000,
+    max_traj_chars: int = 16000,
     max_tokens: int = 8192,
     api_key: str = "EMPTY",
 ) -> list[tuple[float, str]]:
     """For each ExecutionResult, return (adherence in [0,1], insight_text).
-    Order matches input. Rollouts with no trajectory → (0.0, "").
+    Order matches input. Rollouts with no trajectory → (_PARSE_FAILED_ADH, "").
 
     The judge emits two XML tags: <adherence>N</adherence> and <insight>...</insight>.
-    Parse failures fall back to (0.0, ""); no retries.
+    Parse failures fall back to (_PARSE_FAILED_ADH, ""); no retries. We log
+    the fraction that fell back so training runs with a broken judge don't
+    silently collapse the GRPO reward signal.
     """
     if not results:
         return []
@@ -594,7 +738,7 @@ async def score_reflection_batch(
 
     async def _one(r) -> tuple[float, str]:
         if r.trajectory_path is None:
-            return 0.0, ""
+            return _PARSE_FAILED_ADH, _PARSE_FAILED_INSIGHT_SENTINEL
         summary = summarize_trajectory(r.trajectory_path, max_chars=max_traj_chars)
         return await _judge_one(client, model, r.strategy.strategy, summary, sem, max_tokens)
 
@@ -603,7 +747,36 @@ async def score_reflection_batch(
         await client.close()
     except Exception:
         pass
-    return out
+
+    # Impute parse-failed adherence with the batch mean of successful parses.
+    # This keeps the reward signal on the same scale as the observed batch
+    # (rather than the 0.5 middle, which is above the observed mean ~0.30-0.36,
+    # and would give failed parses an unearned upgrade), and is neutral wrt
+    # GRPO advantage (imputed values cluster near group mean).
+    import math
+    valid = [a for a, _ in out if not math.isnan(a)]
+    n_fallback = sum(1 for a, _ in out if math.isnan(a))
+    imputed = sum(valid) / len(valid) if valid else 1.0  # empty batch → bare milestone
+
+    patched: list[tuple[float, str]] = []
+    for a, ins in out:
+        if math.isnan(a):
+            patched.append((imputed, ins))
+        else:
+            patched.append((a, ins))
+
+    if out and n_fallback / len(out) > 0.25:
+        logger.warning(
+            f"reflection judge fell back on {n_fallback}/{len(out)} rollouts "
+            f"({100*n_fallback/len(out):.0f}%) — imputing with batch mean "
+            f"{imputed:.3f}; adherence signal for this round is unreliable."
+        )
+    elif n_fallback:
+        logger.info(
+            f"reflection judge fell back on {n_fallback}/{len(out)} rollouts; "
+            f"imputed with batch mean {imputed:.3f}."
+        )
+    return patched
 
 
 # Back-compat shim — callers that only want adherence can still use this.
@@ -612,7 +785,7 @@ async def score_adherence_batch(
     base_url: str,
     model: str,
     concurrency: int = 64,
-    max_traj_chars: int = 8000,
+    max_traj_chars: int = 16000,
     max_tokens: int = 8192,
     api_key: str = "EMPTY",
 ) -> list[float]:
@@ -636,16 +809,24 @@ def compute_reward(
     gamma_strategy: float = 0.0,
     thinking_ref_tokens: int = 3000,
     strategy_ref_tokens: int = 500,
+    reward_compression: str = "none",
 ) -> float:
     """Composite reward:
-        r = a · r_milestone + λ · a + γ_t · f_think + γ_s · f_strat
+        r = a · f(r_milestone) + λ · a + γ_t · f_think + γ_s · f_strat
 
-    where f_think = min(thinking_length / thinking_ref, 1) and likewise for f_strat.
-    Both length terms saturate at 1.0 so very long thinking doesn't dominate the reward.
-
-    With `adherence=1.0` and all γ/λ = 0 this reduces to the bare milestone reward.
+    where f is the compression chosen by `reward_compression` ∈
+    {"none", "log1p", "sqrt"}. Compression narrows the 0..12 milestone
+    span so milestone=7 outliers don't dominate intra-group advantages.
+    Length terms saturate at 1.0.
     """
+    import math
     r_mile = MILESTONE_REWARDS[milestone]
+    if reward_compression == "log1p":
+        r_mile = math.log1p(r_mile)
+    elif reward_compression == "sqrt":
+        r_mile = math.sqrt(max(r_mile, 0.0))
+    elif reward_compression != "none":
+        raise ValueError(f"Unknown reward_compression: {reward_compression!r}")
     f_think = min(thinking_length / max(thinking_ref_tokens, 1), 1.0)
     f_strat = min(strategy_length / max(strategy_ref_tokens, 1), 1.0)
     return (

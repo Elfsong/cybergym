@@ -41,7 +41,7 @@ Reflection judge + archive live inside `dual_loops/` (`adherence.py`, `archive.p
 - **`CYBERGYM_API_KEY` is required** for the milestone 6 vs 7 distinction (fix-build verification via `/verify-agent-pocs`). Without it the detector caps at milestone 6.
 - **`StrategyToExecute.prompt`** is a live Tinker ModelInput object. It is pickled for resume but must not be JSON-serialized; only text and metadata go into `strategies.json`.
 - **OpenHands agent_id vs our agent_id**: each OpenHands subprocess generates its own UUID inside the sandbox. `executor.py` discovers the actual sub-dir name after the run and reports it as `real_agent_id` so fix-build verification can find the PoCs.
-- **KL penalty** is in the config (`kl_beta`) but not currently wired: the Tinker `importance_sampling` loss does not accept a KL term. Stability comes from LoRA + cosine LR + grad-clip instead.
+- **KL-to-reference penalty is deferred.** The `kl_beta` field exists but neither the `importance_sampling` nor the `ppo` loss accepts a KL term directly — wiring KL would require a custom Tinker loss function (non-trivial). Current stability package: PPO ratio clip (ε=0.2), LoRA rank 32, cosine LR with 10% warmup, grad-clip 1.0, advantage `mean_only` normalization, `log1p` reward compression, K=16. Revisit KL only if `clip_fraction` or `approx_kl` from the PPO loss shows runaway drift across rounds.
 
 ## Running
 

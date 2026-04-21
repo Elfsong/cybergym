@@ -31,7 +31,7 @@ from .archive import Archive
 from .config import Config
 from .executor import ExecutionResult, execute_strategies
 from .planner import Planner, StrategyToExecute, Task
-from .reward import MILESTONE_REWARDS, compute_reward, detect_milestone
+from .reward import compute_reward, detect_milestone
 from .utils import (
     get_task_description,
     parse_tasks_file,
@@ -56,18 +56,20 @@ def build_tasks(task_ids: list[str], config: Config, archive: Archive | None) ->
     ]
 
 
-def score_results(
+def score_milestones(
     results: list[ExecutionResult],
     config: Config,
-) -> list[tuple[StrategyToExecute, float, int]]:
-    """Score every execution result: (strategy, reward, milestone)."""
-    rewarded: list[tuple[StrategyToExecute, float, int]] = []
+) -> list[tuple[StrategyToExecute, int]]:
+    """Score every execution result: (strategy, milestone).
+
+    Reward is NOT computed here — the composite reward depends on the
+    reflection judge's adherence score, so the caller computes reward once
+    after both milestone and adherence are known (see run_round).
+    """
+    scored: list[tuple[StrategyToExecute, int]] = []
     for r in results:
         if r.trajectory_path is None:
-            # No trajectory → milestone 0
-            milestone = 0
-            ms_reward = MILESTONE_REWARDS[0]
-            rewarded.append((r.strategy, ms_reward, milestone))
+            scored.append((r.strategy, 0))
             continue
         ms_result = detect_milestone(
             r.trajectory_path,
@@ -77,23 +79,23 @@ def score_results(
             traj_format="openhands",
             verify_fix=True,
         )
-        reward = compute_reward(
-            ms_result.milestone,
-            adherence=1.0,
-            lambda_adherence=config.lambda_adherence,
-            thinking_length=r.strategy.n_thinking_tokens,
-            strategy_length=r.strategy.n_strategy_tokens,
-            gamma_thinking=config.gamma_thinking,
-            gamma_strategy=config.gamma_strategy,
-            thinking_ref_tokens=config.thinking_ref_tokens,
-            strategy_ref_tokens=config.strategy_ref_tokens,
-        )
         logger.debug(
-            f"{r.strategy.task_id} [g{r.strategy.group_id}] milestone={ms_result.milestone} "
-            f"reward={reward:.2f} — {ms_result.reasoning}"
+            f"{r.strategy.task_id} [g{r.strategy.group_id}] "
+            f"milestone={ms_result.milestone} — {ms_result.reasoning}"
         )
-        rewarded.append((r.strategy, reward, ms_result.milestone))
-    return rewarded
+        scored.append((r.strategy, ms_result.milestone))
+    return scored
+
+
+# Back-compat alias — existing callers (if any) that imported `score_results`
+# can keep working but should migrate to `score_milestones`.
+def score_results(results, config):
+    """Deprecated — use score_milestones. Kept as a shim returning
+    (strategy, 0.0, milestone) triples for call-site compatibility.
+    Reward field is 0.0 (caller must recompose). See run_round for the
+    current single-pass reward computation after adherence is known.
+    """
+    return [(s, 0.0, m) for s, m in score_milestones(results, config)]
 
 
 async def run_round(
@@ -158,10 +160,10 @@ async def run_round(
     exec_seconds = int(time.monotonic() - t_exec)
     logger.info(f"Execution: {len(results)} rollouts in {exec_seconds}s")
 
-    # 4a) Score milestone (initial pass uses adherence=1.0; reflection below supplies the real value)
-    rewarded = score_results(results, config)
+    # 4a) Milestone detection (query server for each rollout).
+    scored = score_milestones(results, config)  # list[(strategy, milestone)]
 
-    # 4b) Reflection judge → (adherence, insight) per rollout → composite reward
+    # 4b) Reflection judge → (adherence, insight) per rollout.
     from dual_loops.reward import score_reflection_batch
     t_adh = time.monotonic()
     pairs = await score_reflection_batch(
@@ -175,8 +177,9 @@ async def run_round(
     adherences = [a for a, _ in pairs]
     insights = [ins for _, ins in pairs]
     adh_seconds = int(time.monotonic() - t_adh)
-    # Recompose reward with the gated / composite formula:
-    #   r = a · r_milestone + λ · a + γ_t · f_think + γ_s · f_strat
+
+    # 4c) Compose reward ONCE with both milestone and adherence:
+    #     r = a · r_milestone + λ · a + γ_t · f_think + γ_s · f_strat
     rewarded = [
         (s, compute_reward(
             milestone=m,
@@ -188,8 +191,9 @@ async def run_round(
             gamma_strategy=config.gamma_strategy,
             thinking_ref_tokens=config.thinking_ref_tokens,
             strategy_ref_tokens=config.strategy_ref_tokens,
+            reward_compression=config.reward_compression,
         ), m)
-        for i, (s, _, m) in enumerate(rewarded)
+        for i, (s, m) in enumerate(scored)
     ]
     mean_adherence = sum(adherences) / max(len(adherences), 1)
     n_with_insight = sum(1 for ins in insights if ins)
@@ -372,8 +376,15 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
         raise RuntimeError(f"No tasks in {config.tasks_file}")
     logger.info(f"Task pool: {len(all_task_ids)} tasks")
 
+    seed_paths: tuple[Path, ...] = ()
+    if (
+        config.archive_enabled
+        and config.global_archive_path
+        and config.global_archive_path.exists()
+    ):
+        seed_paths = (config.global_archive_path,)
     archive = (
-        Archive(config.archive_path, seed=42)
+        Archive(config.archive_path, seed=42, seed_paths=seed_paths)
         if config.archive_enabled
         else None
     )

@@ -20,15 +20,33 @@ class Archive:
         - Repeat `n` times (without replacement).
     """
 
-    def __init__(self, path: Path, seed: int | None = None):
+    def __init__(
+        self,
+        path: Path,
+        seed: int | None = None,
+        seed_paths: tuple[Path, ...] | list[Path] = (),
+    ):
+        """`seed_paths` are read-only archives (e.g. a promoted global
+        experience pool) loaded before the per-run archive so new runs
+        start hot instead of cold. The per-run archive at `path` is the
+        only one appended to — seeds stay untouched.
+        """
         self.path = path
         self._index: dict[str, list[dict]] = defaultdict(list)
         self._rng = random.Random(seed)
+        own_resolved = path.resolve() if path.exists() else None
+        for sp in seed_paths or ():
+            if sp is None or not Path(sp).exists():
+                continue
+            if own_resolved is not None and Path(sp).resolve() == own_resolved:
+                continue
+            self._load_from(Path(sp), label=f"seed:{sp}")
         if path.exists():
-            self._load()
+            self._load_from(path, label="own")
 
-    def _load(self) -> None:
-        with open(self.path) as f:
+    def _load_from(self, path: Path, label: str = "") -> None:
+        added = 0
+        with open(path) as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -36,10 +54,15 @@ class Archive:
                 try:
                     rec = json.loads(line)
                     self._index[rec["task_id"]].append(rec)
+                    added += 1
                 except (json.JSONDecodeError, KeyError):
                     continue
-        n = sum(len(v) for v in self._index.values())
-        logger.info(f"Archive loaded: {n} records across {len(self._index)} tasks")
+        total = sum(len(v) for v in self._index.values())
+        logger.info(
+            f"Archive loaded {added} records from {path}"
+            + (f" ({label})" if label else "")
+            + f"; total now {total} across {len(self._index)} tasks"
+        )
 
     # v2+ optional fields (backward compatible — records missing these are fine)
     _V2_FIELDS = (

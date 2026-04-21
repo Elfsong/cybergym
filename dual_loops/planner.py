@@ -320,6 +320,11 @@ class Planner:
         n_degenerate = 0
         n_used = 0
         rewards_all: list[float] = []
+        group_reward_stds: list[float] = []
+        advantages_all: list[float] = []
+
+        norm_mode = getattr(self.config, "advantage_normalization", "mean_std")
+        std_floor = getattr(self.config, "advantage_std_floor", 0.3)
 
         for tid, group in groups.items():
             rewards = [r for _, r in group]
@@ -327,12 +332,20 @@ class Planner:
             mean_r = sum(rewards) / len(rewards)
             var_r = sum((r - mean_r) ** 2 for r in rewards) / len(rewards)
             std_r = var_r ** 0.5
+            group_reward_stds.append(std_r)
 
             if std_r < eps:
                 n_degenerate += 1
                 continue
 
-            advantages = [(r - mean_r) / (std_r + eps) for r in rewards]
+            if norm_mode == "mean_only":
+                advantages = [r - mean_r for r in rewards]
+            elif norm_mode == "clipped_std":
+                denom = max(std_r, std_floor)
+                advantages = [(r - mean_r) / denom for r in rewards]
+            else:  # "mean_std" (legacy)
+                advantages = [(r - mean_r) / (std_r + eps) for r in rewards]
+            advantages_all.extend(advantages)
             group_datums = []
 
             for (strat, _), adv in zip(group, advantages):
@@ -345,7 +358,14 @@ class Planner:
                 )
                 ob_len = strat.prompt_length - 1
                 tokens = list(strat.tokens)
-                padded_advantages = [0.0] * ob_len + [adv] * (model_input.length - ob_len)
+                n_gen = model_input.length - ob_len
+                # Per-token advantage = adv / n_gen so each sample contributes
+                # ~adv (not adv × n_gen) to Tinker's loss:sum. Without this,
+                # long sequences dominate the sum and gradients scale with
+                # total-token-count, which forced grad_clip to saturate every
+                # step (observed unclipped L2 ≈ 3k vs clip 1.0).
+                per_token_adv = adv / max(n_gen, 1)
+                padded_advantages = [0.0] * ob_len + [per_token_adv] * n_gen
                 target_tokens = [0] * ob_len + tokens
                 padded_logprobs = [0.0] * ob_len + list(strat.logprobs)
 
@@ -363,12 +383,39 @@ class Planner:
             if group_datums:
                 task_datums[tid] = group_datums
 
+        def _pct(xs: list[float], q: float) -> float:
+            if not xs:
+                return 0.0
+            s = sorted(xs)
+            k = min(max(int(q * (len(s) - 1)), 0), len(s) - 1)
+            return s[k]
+
+        def _stats(xs: list[float]) -> dict:
+            if not xs:
+                return {"n": 0}
+            m = sum(xs) / len(xs)
+            v = sum((x - m) ** 2 for x in xs) / len(xs)
+            return {
+                "n":    len(xs),
+                "min":  min(xs),
+                "max":  max(xs),
+                "mean": m,
+                "std":  v ** 0.5,
+                "p05":  _pct(xs, 0.05),
+                "p50":  _pct(xs, 0.50),
+                "p95":  _pct(xs, 0.95),
+            }
+
         summary = {
             "used": n_used,
             "degenerate": n_degenerate,
             "total_groups": len(groups),
             "frac_degenerate": n_degenerate / max(len(groups), 1),
             "mean_reward": sum(rewards_all) / max(len(rewards_all), 1),
+            "reward_stats":       _stats(rewards_all),
+            "group_reward_std":   _stats(group_reward_stds),
+            "advantage_stats":    _stats(advantages_all),
+            "advantage_norm":     norm_mode,
         }
         return task_datums, summary
 
@@ -482,9 +529,17 @@ class Planner:
         def _adam(i: int):
             return self._adam_params_at_lr(self._lr_at_step(base_step + i))
 
+        loss_fn_name = getattr(self.config, "loss_fn_name", "importance_sampling")
+        loss_fn_config: dict | None = None
+        if loss_fn_name == "ppo":
+            loss_fn_config = {
+                "clip_low_threshold":  self.config.ppo_clip_low_threshold,
+                "clip_high_threshold": self.config.ppo_clip_high_threshold,
+            }
+
         # Enqueue first batch
         fwd_bwd_future = await self.training_client.forward_backward_async(
-            datum_batches[0], loss_fn="importance_sampling",
+            datum_batches[0], loss_fn=loss_fn_name, loss_fn_config=loss_fn_config,
         )
         optim_future = await self.training_client.optim_step_async(_adam(0))
 
@@ -492,7 +547,7 @@ class Planner:
             # Enqueue next batch before awaiting current (keeps pipeline full)
             if i + 1 < actual_substeps:
                 next_fwd = await self.training_client.forward_backward_async(
-                    datum_batches[i + 1], loss_fn="importance_sampling",
+                    datum_batches[i + 1], loss_fn=loss_fn_name, loss_fn_config=loss_fn_config,
                 )
                 next_opt = await self.training_client.optim_step_async(_adam(i + 1))
             else:
@@ -500,13 +555,21 @@ class Planner:
                 next_opt = None
 
             # Consume current
-            await fwd_bwd_future.result_async()
+            fb_result = await fwd_bwd_future.result_async()
             opt_result = await optim_future.result_async()
             step_info = {
                 "substep": i,
                 "n_datums": len(datum_batches[i]),
                 "lr": self._lr_at_step(base_step + i),
             }
+            if getattr(fb_result, "metrics", None):
+                fb = dict(fb_result.metrics)
+                # Tinker reports loss:sum (sum over all tokens in the mini-batch).
+                # Divide by datum count so the logged value is comparable across
+                # substeps with different batch sizes.
+                if "loss:sum" in fb:
+                    fb["loss:per_datum"] = fb["loss:sum"] / max(step_info["n_datums"], 1)
+                step_info["fb_metrics"] = fb
             if getattr(opt_result, "metrics", None):
                 step_info["optim_metrics"] = dict(opt_result.metrics)
             substep_metrics.append(step_info)
@@ -515,17 +578,63 @@ class Planner:
                 fwd_bwd_future = next_fwd
                 optim_future = next_opt
 
+        # Aggregate fb_metrics across substeps into round-level means (for quick logging)
+        fb_keys: set[str] = set()
+        for s in substep_metrics:
+            fb_keys.update((s.get("fb_metrics") or {}).keys())
+        mean_fb_metrics: dict[str, float] = {}
+        for k in fb_keys:
+            vals = [s["fb_metrics"][k] for s in substep_metrics
+                    if k in (s.get("fb_metrics") or {})]
+            if vals:
+                mean_fb_metrics[k] = sum(vals) / len(vals)
+
         metrics.update({
             "num_substeps": actual_substeps,
             "mini_batch_size": self.config.mini_batch_size,
             "substep_datum_counts": [len(b) for b in datum_batches],
             "substep_metrics": substep_metrics,
+            "mean_fb_metrics": mean_fb_metrics,
         })
 
+        # Prefer the per-datum mean for the log line; fall back to legacy keys.
+        loss_key = next(
+            (k for k in ("loss:per_datum", "loss", "loss:mean",
+                         "policy_loss", "policy_loss:mean")
+             if k in mean_fb_metrics),
+            None,
+        )
+        loss_str = (
+            f", {loss_key}={mean_fb_metrics[loss_key]:.4f}" if loss_key
+            else (f", fb_metrics={mean_fb_metrics}" if mean_fb_metrics else "")
+        )
+        # Surface stability-diagnostic metrics: ratio clip_fraction / approx-KL
+        # if Tinker returns them, plus mean optimizer grad norm.
+        extra_fields: list[str] = []
+        for k in ("clip_fraction", "clip_fraction:mean",
+                  "approx_kl", "approx_kl:mean",
+                  "unclipped_grad_l2:mean"):
+            if k in mean_fb_metrics:
+                extra_fields.append(f"{k}={mean_fb_metrics[k]:.4f}")
+        # Advantage + reward-std distribution (from summary we produced in _build_task_datums)
+        adv = metrics.get("advantage_stats") or {}
+        grs = metrics.get("group_reward_std") or {}
+        if adv.get("n"):
+            extra_fields.append(
+                f"adv[min/p50/max]={adv['min']:.2f}/{adv['p50']:.2f}/{adv['max']:.2f}"
+                f" std={adv['std']:.2f}"
+            )
+        if grs.get("n"):
+            extra_fields.append(
+                f"group_reward_std[p05/p50/p95]="
+                f"{grs['p05']:.2f}/{grs['p50']:.2f}/{grs['p95']:.2f}"
+            )
+        extra_str = (", " + ", ".join(extra_fields)) if extra_fields else ""
         logger.info(
             f"GRPO update: used={metrics['used']}, "
             f"degenerate={metrics['degenerate']}/{metrics['total_groups']}, "
             f"substeps={actual_substeps}, mean_reward={metrics['mean_reward']:.3f}"
+            f"{loss_str}{extra_str}"
         )
         return metrics
 

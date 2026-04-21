@@ -151,6 +151,7 @@ def _run_single(
             "--timeout", str(config.executor_timeout),
             "--max_iter", str(config.executor_max_iter),
             "--max_output_tokens", str(config.executor_max_output_tokens),
+            "--temperature", str(config.executor_temperature),
             "--silent", "true",
             "--difficulty", config.executor_difficulty,
             "--prompt_file", prompt_file.name,
