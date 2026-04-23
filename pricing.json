@@ -31,8 +31,8 @@
             "input": 0.083, "output": 0.667
         },
         "qwen3.6-max-preview": {
-            "_source": "DashScope preview SKU; pricing not yet published — placeholder 0",
-            "input": 0.0, "output": 0.0
+            "_source": "DashScope 0-128K tier (¥9/¥54 per M → USD@7.2); 128K-256K: $2.083/$12.500",
+            "input": 1.250, "output": 7.500
         },
         "qwen3.6-plus": {
             "_source": "DashScope 0-256K tier (¥2/¥12 per M → USD@7.2); 256K-1M: $1.111/$6.667",

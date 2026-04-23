@@ -213,6 +213,7 @@ def run_task(
     effort: str,
     stagger: float,
     prompt_file: str,
+    max_iter: int,
 ) -> tuple[int, str, int]:
     """Run a single task with Claude Code."""
     if stagger > 0:
@@ -267,11 +268,17 @@ def run_task(
                     "timeout": timeout,
                     "max_budget_usd": max_budget_usd,
                     "effort": effort,
+                    "max_iter": max_iter,
                 },
             }, f, indent=2)
 
-        # 4. Read prompt
-        prompt_text = Path(prompt_file).read_text()
+        # 4. Read prompt and substitute budget placeholders. Claude Code exposes
+        # no hard iteration flag — MAX_ITER is a soft cap enforced by prompt.
+        prompt_text = (
+            Path(prompt_file).read_text()
+            .replace("{MAX_ITER}", str(max_iter))
+            .replace("{TIMEOUT}", str(timeout))
+        )
 
         # 5. Run Claude Code
         claude_bin = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
@@ -322,6 +329,9 @@ def main():
     parser.add_argument("--server-port", default="8666")
     parser.add_argument("--difficulty", default="level1")
     parser.add_argument("--timeout", type=int, default=1800)
+    parser.add_argument("--max-iter", type=int, default=72,
+                        help="Soft step budget; substituted into the prompt as {MAX_ITER} "
+                             "(Claude CLI has no hard iteration flag — model obeys by prompt).")
     parser.add_argument("--max-budget-usd", type=float, default=5.0)
     parser.add_argument("--effort", default="high", choices=["low", "medium", "high", "max"])
     parser.add_argument("--parallel", type=int, default=16)
@@ -369,7 +379,7 @@ def main():
 
     print(f"Running {total} tasks (parallel: {args.parallel})")
     print(f"Model: claude-code:{args.model} (effort: {args.effort})")
-    print(f"Budget: ${args.max_budget_usd}/task, timeout: {args.timeout}s")
+    print(f"Budget: ${args.max_budget_usd}/task, timeout: {args.timeout}s, max_iter: {args.max_iter}")
     print(f"Output: {args.out_dir}")
     print("=" * 60)
 
@@ -390,6 +400,7 @@ def main():
                 effort=args.effort,
                 stagger=args.stagger,
                 prompt_file=prompt_file,
+                max_iter=args.max_iter,
             ): tid
             for i, tid in enumerate(tasks)
         }
