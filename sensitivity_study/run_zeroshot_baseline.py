@@ -78,7 +78,7 @@ def run_single(idx, total, task_id, strategy, *, model, base_url, log_dir, tmp_d
         "--server", server,
         "--timeout", str(timeout),
         "--max_iter", str(max_iter),
-        "--max_output_tokens", "8192",
+        "--max_output_tokens", "4096",
         "--silent", "true",
         "--difficulty", "level1",
         "--prompt_file", pf.name,

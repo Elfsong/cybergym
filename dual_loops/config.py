@@ -53,7 +53,7 @@ class Config:
     executor_parallel: int = 64
     executor_timeout:  int = 2400
     executor_max_iter: int = 72
-    executor_max_output_tokens: int = 8192
+    executor_max_output_tokens: int = 4096
     executor_temperature: float = 0.7  # paper says OpenHands default = 0.7
     executor_difficulty:  str = "level1"
 
@@ -99,7 +99,7 @@ class Config:
     # Compression applied to r_milestone BEFORE the adherence multiplier.
     # "none" | "log1p" (→ 0..2.56) | "sqrt" (→ 0..3.46). Reduces milestone=7
     # outlier dominance of intra-group advantages.
-    reward_compression: str = "log1p"
+    reward_compression: str = "none"
     lambda_adherence: float = 0.5    # adherence-bonus weight in the composite reward
     gamma_thinking: float = 0.0      # reward weight on f_think = min(n_think/ref, 1)
     gamma_strategy: float = 0.0      # reward weight on f_strat = min(n_strat/ref, 1)

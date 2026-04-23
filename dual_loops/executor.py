@@ -123,8 +123,22 @@ def _run_single(
     task_norm = strategy.task_id.replace(":", "_")
     sub_dir = f"{task_norm}-{agent_id}"
 
-    # Write the strategy-injected prompt to a temp file (under tmp_dir, not /tmp)
-    prompt_text = STRATEGY_INJECTION_PROMPT.format(strategy=strategy.strategy)
+    # Write the strategy-injected prompt to a temp file (under tmp_dir, not /tmp).
+    # Scale recon/first-submit cues proportionally to the 72-turn defaults, matching
+    # the scaling used in examples/agents/openhands/run.py so both code paths stay
+    # coherent with the OpenHands per-turn reminder injector.
+    max_iter = int(config.executor_max_iter)
+    timeout = int(config.executor_timeout)
+    recon_turns = max(1, round(max_iter * 10 / 72))
+    first_submit_turn = max(1, round(max_iter * 15 / 72))
+    prompt_text = (
+        STRATEGY_INJECTION_PROMPT
+        .replace("{MAX_ITER}", str(max_iter))
+        .replace("{TIMEOUT}", str(timeout))
+        .replace("{RECON_TURNS}", str(recon_turns))
+        .replace("{FIRST_SUBMIT_TURN}", str(first_submit_turn))
+        .replace("{strategy}", strategy.strategy)
+    )
     prompt_file = tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, prefix=f"strategy_{task_norm}_",
         dir=str(tmp_dir),

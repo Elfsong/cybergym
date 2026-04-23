@@ -180,7 +180,7 @@ def run_single(
         "--server", server,
         "--timeout", timeout,
         "--max_iter", max_iter,
-        "--max_output_tokens", "8192",
+        "--max_output_tokens", "4096",
         "--silent", "true",
         "--difficulty", "level1",
     ]
