@@ -48,6 +48,61 @@ logger = logging.getLogger(__name__)
 
 
 # ==========================================================================
+# Retry helpers (exponential backoff for flaky LLM/server calls)
+# ==========================================================================
+
+async def _aretry(
+    coro_factory,
+    *,
+    attempts: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 16.0,
+    label: str = "call",
+):
+    """Await coro_factory() up to `attempts` times with exponential backoff.
+
+    coro_factory is a no-arg callable returning a fresh coroutine — we re-call
+    it on each retry because awaited coroutines can't be re-used. Returns the
+    first successful result; re-raises the last exception if all attempts fail.
+    """
+    last_exc: Exception | None = None
+    for i in range(attempts):
+        try:
+            return await coro_factory()
+        except Exception as e:
+            last_exc = e
+            if i == attempts - 1:
+                break
+            delay = min(max_delay, base_delay * (2 ** i))
+            logger.warning(f"{label} attempt {i+1}/{attempts} failed: {e}; retrying in {delay:.1f}s")
+            await asyncio.sleep(delay)
+    raise last_exc  # type: ignore[misc]
+
+
+def _retry(
+    fn,
+    *,
+    attempts: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 16.0,
+    label: str = "call",
+):
+    """Synchronous twin of _aretry."""
+    last_exc: Exception | None = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            if i == attempts - 1:
+                break
+            delay = min(max_delay, base_delay * (2 ** i))
+            logger.warning(f"{label} attempt {i+1}/{attempts} failed: {e}; retrying in {delay:.1f}s")
+            time.sleep(delay)
+    raise last_exc  # type: ignore[misc]
+
+
+# ==========================================================================
 # Milestone constants
 # ==========================================================================
 
@@ -249,8 +304,10 @@ def verify_pocs_on_fix(
         return []
 
     headers = {"X-API-Key": api_key}
-    # 1) Trigger verification on fix builds
-    try:
+    # 1) Trigger verification on fix builds (with retry; CyberGym server is
+    # the bottleneck on milestone=7 truth and a transient 5xx would silently
+    # mark a successful exploit as milestone=6).
+    def _verify():
         with httpx.Client(base_url=server, timeout=timeout) as client:
             resp = client.post(
                 "/verify-agent-pocs",
@@ -258,14 +315,20 @@ def verify_pocs_on_fix(
                 headers=headers,
             )
             if resp.status_code == 404:
-                return []
+                return None  # 404 is "not found" not transient — don't retry
             resp.raise_for_status()
+            return resp
+    try:
+        result = _retry(_verify, attempts=3, base_delay=2.0,
+                        label=f"verify-agent-pocs[{agent_id[:8]}]")
+        if result is None:
+            return []
     except Exception as e:
-        logger.warning(f"verify-agent-pocs failed for {agent_id}: {e}")
+        logger.warning(f"verify-agent-pocs failed for {agent_id} after retries: {e}")
         return []
 
     # 2) Query DB (via /query-poc) for results including fix_exit_code
-    try:
+    def _query():
         with httpx.Client(base_url=server, timeout=30) as client:
             resp = client.post(
                 "/query-poc",
@@ -273,10 +336,14 @@ def verify_pocs_on_fix(
                 headers=headers,
             )
             if resp.status_code != 200:
-                return []
+                return None
             return resp.json()
+    try:
+        data = _retry(_query, attempts=3, base_delay=1.0,
+                      label=f"query-poc[{agent_id[:8]}]")
+        return data if data is not None else []
     except Exception as e:
-        logger.warning(f"query-poc failed for {agent_id}: {e}")
+        logger.warning(f"query-poc failed for {agent_id} after retries: {e}")
         return []
 
 
@@ -727,14 +794,17 @@ async def _judge_one(
     )
     async with semaphore:
         try:
-            resp = await client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": user_content}],
-                temperature=0.0,
-                max_tokens=max_tokens,
+            resp = await _aretry(
+                lambda: client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": user_content}],
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                ),
+                attempts=3, base_delay=2.0, label="reflection-judge",
             )
         except Exception as e:
-            logger.warning(f"reflection judge call failed: {e}")
+            logger.warning(f"reflection judge call failed after retries: {e}")
             return _PARSE_FAILED_ADH, _PARSE_FAILED_INSIGHT_SENTINEL
     content = (resp.choices[0].message.content or "") if resp.choices else ""
     adh, insight = _parse_reflection(content)

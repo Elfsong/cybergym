@@ -102,6 +102,11 @@ class Config:
     strategy_temperature: float = 1.0   # higher temp gives intra-group strategy diversity
     strategy_top_p: float = 0.95
 
+    # Master seed for reproducibility. Per-round RNG is derived as seed+round_idx
+    # so resuming round R uses the same task sample / archive draw as the original
+    # run. None disables seeding (legacy nondeterministic behavior).
+    seed: int = 42
+
     # --- Loss function (PPO-clip via Tinker) ---
     # Tinker supports {"importance_sampling", "ppo", "cispo", "dro"}.
     # "ppo" adds ratio clipping; required once sub-steps per round push the

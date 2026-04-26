@@ -109,14 +109,27 @@ class Archive:
         "insight" is an empty string when the source record predates reflection (v1/v2
         archives) or when the reflection judge failed to produce one.
 
+        Selection algorithm:
         - Filter the task's records to milestone >= min_milestone.
         - For each of n slots: sample t candidates, pick the highest-milestone one,
           remove it from the pool (without replacement).
-        - If the pool is empty before filling n slots, return what we have.
+        - If the filtered pool is empty (no record at the quality threshold), fall
+          back to the all-records pool. Without this fallback, hard tasks where
+          every rollout fails to submit (m<3) end up with empty retrieval forever
+          and the planner gets cold-start prompts every round, locking those
+          tasks into a positive-feedback failure loop. We accept the slight
+          quality dilution to break that loop.
         """
-        pool = [r for r in self._index.get(task_id, []) if r["milestone"] >= min_milestone]
+        all_records = self._index.get(task_id, [])
+        pool = [r for r in all_records if r["milestone"] >= min_milestone]
+        fallback = False
         if not pool:
-            return []
+            if not all_records:
+                return []
+            # No record meets the bar; use whatever we have so the planner sees
+            # *something* about this task instead of cold-start.
+            pool = all_records
+            fallback = True
 
         selected: list[dict] = []
         remaining = pool.copy()
@@ -134,6 +147,8 @@ class Archive:
                 "strategy":  r["strategy"],
                 "milestone": r["milestone"],
                 "insight":   r.get("insight", "") or "",
+                # mark fallback so callers/metrics can track quality dilution
+                **({"_fallback": True} if fallback else {}),
             }
             for r in selected
         ]

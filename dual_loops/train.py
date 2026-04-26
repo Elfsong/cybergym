@@ -243,10 +243,24 @@ async def run_round(
         round_dir / "rewards.jsonl",
     )
 
-    # 5) GRPO update (pass round_idx for per-round shuffle seed)
+    # 5) GRPO update (pass round_idx for per-round shuffle seed).
+    # cancelled_mask: APRIL-cancelled rollouts are missing-not-failed; their
+    # 0-reward placeholder would otherwise depress the group mean and bias
+    # the planner toward whatever finishes fastest (long-running strategies
+    # are systematically more likely to be cancelled). Drop them from group
+    # statistics in _build_task_datums.
+    cancelled_mask = [getattr(results[i], "cancelled", False)
+                      for i in range(len(rewarded))]
+    n_cancelled = sum(cancelled_mask)
+    if n_cancelled:
+        logger.info(
+            f"GRPO group filter: dropping {n_cancelled}/{len(cancelled_mask)} "
+            f"APRIL-cancelled rollouts before computing advantages"
+        )
     metrics = await planner.grpo_update(
         [(s, r) for s, r, _ in rewarded],
         round_idx=round_idx,
+        cancelled_mask=cancelled_mask,
     )
 
     # 6) Archive append — the v3 record carries strategy, milestone, adherence, insight, plus metadata
@@ -406,7 +420,7 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
     ):
         seed_paths = (config.global_archive_path,)
     archive = (
-        Archive(config.archive_path, seed=42, seed_paths=seed_paths)
+        Archive(config.archive_path, seed=config.seed, seed_paths=seed_paths)
         if config.archive_enabled
         else None
     )
@@ -426,7 +440,8 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
 
     # RNG is reseeded deterministically each round (round_idx offset), so
     # resuming with the same seed reproduces the same task sampling pattern.
-    rng = random.Random(42)
+    rng = random.Random(config.seed)
+    logger.info(f"RNG seed: {config.seed}")
     # Advance rng to match the state after skipped rounds (same sequence)
     for _ in range(start_round):
         if config.batch_size >= len(all_task_ids):

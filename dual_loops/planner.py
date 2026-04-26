@@ -323,17 +323,38 @@ class Planner:
         self,
         strategies_with_rewards: list[tuple[StrategyToExecute, float]],
         eps: float,
+        *,
+        cancelled_mask: list[bool] | None = None,
     ) -> tuple[dict[str, list], dict]:
         """Compute per-task GRPO advantages and build datums grouped by task_id.
 
         Returns (task_datums, summary) where
           task_datums maps task_id -> list[tinker.Datum]  (degenerate groups omitted)
-          summary has {used, degenerate, total_groups, frac_degenerate, mean_reward}.
+          summary has {used, degenerate, total_groups, frac_degenerate, mean_reward,
+                       n_cancelled_dropped}.
+
+        APRIL handling: if cancelled_mask is provided, those samples are excluded
+        BEFORE computing per-task mean/std. Their pseudo-reward (often 0.0 from
+        a missing trajectory) is missing-not-failed; including it would
+        systematically depress the group mean and bias the planner toward
+        whatever style of strategy happens to finish fastest.
         """
         from collections import defaultdict
 
+        if cancelled_mask is None:
+            cancelled_mask = [False] * len(strategies_with_rewards)
+        if len(cancelled_mask) != len(strategies_with_rewards):
+            raise ValueError(
+                f"cancelled_mask length {len(cancelled_mask)} != "
+                f"strategies_with_rewards length {len(strategies_with_rewards)}"
+            )
+
         groups: dict[str, list[tuple[StrategyToExecute, float]]] = defaultdict(list)
-        for strat, reward in strategies_with_rewards:
+        n_cancelled_dropped = 0
+        for (strat, reward), is_cancelled in zip(strategies_with_rewards, cancelled_mask):
+            if is_cancelled:
+                n_cancelled_dropped += 1
+                continue
             groups[strat.task_id].append((strat, reward))
 
         task_datums: dict[str, list] = {}
@@ -431,6 +452,7 @@ class Planner:
             "degenerate": n_degenerate,
             "total_groups": len(groups),
             "frac_degenerate": n_degenerate / max(len(groups), 1),
+            "n_cancelled_dropped": n_cancelled_dropped,
             "mean_reward": sum(rewards_all) / max(len(rewards_all), 1),
             "reward_stats":       _stats(rewards_all),
             "group_reward_std":   _stats(group_reward_stds),
@@ -496,6 +518,7 @@ class Planner:
         *,
         round_idx: int = 0,
         eps: float = 1e-8,
+        cancelled_mask: list[bool] | None = None,
     ) -> dict:
         """Compute GRPO advantages per-task-group, build Datums, run one
         pipelined forward_backward + optim_step update per mini-batch
@@ -505,13 +528,20 @@ class Planner:
         is a disjoint subset of task groups (GRPO groups stay intact within a
         mini-batch). `mini_batch_size >= batch_size` recovers single-step behavior.
 
+        cancelled_mask, if provided, is a boolean list parallel to
+        strategies_with_rewards; True entries are dropped from group statistics
+        (their reward is missing-not-failed). Used by APRIL early-stop scheduler
+        so cancelled rollouts don't bias group mean/std downward.
+
         Returns summary metrics plus per-substep info.
         """
         import random
         assert self.training_client is not None and self.adam_params is not None
 
         # 1. Build per-task datums (degenerate groups dropped inside)
-        task_datums, metrics = self._build_task_datums(strategies_with_rewards, eps)
+        task_datums, metrics = self._build_task_datums(
+            strategies_with_rewards, eps, cancelled_mask=cancelled_mask,
+        )
 
         if not task_datums:
             logger.warning("No datums to train on this round (all groups degenerate)")

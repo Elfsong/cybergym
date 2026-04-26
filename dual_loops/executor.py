@@ -50,6 +50,10 @@ class ExecutionResult:
     wall_seconds: int
     subprocess_returncode: int | None
     log_dir: Path
+    cancelled: bool = False  # APRIL early-stop preempted this rollout; the
+                             # observation is missing-not-failed, so GRPO
+                             # should drop it from the group rather than
+                             # treat its 0-reward as a true outcome.
 
     @property
     def has_trajectory(self) -> bool:
@@ -228,7 +232,7 @@ def _run_single(
                             pass
                         proc.wait(timeout=5)
                     returncode = proc.returncode
-                    break
+                    break  # cancelled_by_stop=True is captured in the result below
                 # not stopping; loop back and keep waiting
                 continue
     except subprocess.TimeoutExpired:
@@ -276,6 +280,7 @@ def _run_single(
         wall_seconds=elapsed,
         subprocess_returncode=returncode,
         log_dir=log_dir / (traj_path.parent.name if traj_path else sub_dir),
+        cancelled=cancelled_by_stop,
     )
     # Three-state status so diagnostics can distinguish the two no-trajectory modes:
     #   OK      — trajectory file found (subprocess produced a full or partial trace)
@@ -472,13 +477,23 @@ def execute_strategies(
                                 os.killpg(os.getpgid(p.pid), 15)
                             except (ProcessLookupError, PermissionError):
                                 pass
+                    # APRIL-cancelled subprocesses won't get a chance to clean
+                    # up the OpenHands docker containers they spawned (those
+                    # are dockerd's children, not Python's). Fan-out a
+                    # docker-rm sweep here so containers don't accumulate
+                    # across rounds and exhaust the daemon's resource budget.
+                    n_orphans = _cleanup_docker_containers()
+                    if n_orphans:
+                        logger.warning(
+                            f"APRIL stop: removed {n_orphans} orphaned Docker containers"
+                        )
 
     # Fill any still-None slots with a CANCELLED marker so callers (scoring,
     # reward) see a uniform list and downstream GRPO can drop those samples.
-    n_cancelled = 0
+    n_cancelled_slots = 0
     for i in range(len(strategies)):
         if results[i] is None:
-            n_cancelled += 1
+            n_cancelled_slots += 1
             results[i] = ExecutionResult(
                 strategy=strategies[i],
                 agent_id="",
@@ -486,9 +501,15 @@ def execute_strategies(
                 wall_seconds=int(time.monotonic() - round_start),
                 subprocess_returncode=None,
                 log_dir=log_dir,
+                cancelled=True,
             )
-    if n_cancelled:
-        logger.warning(f"APRIL: {n_cancelled} rollouts ended without trajectory")
+    n_cancelled_total = sum(1 for r in results if r.cancelled)
+    if n_cancelled_total:
+        logger.warning(
+            f"APRIL: {n_cancelled_total} rollouts cancelled "
+            f"({n_cancelled_slots} never-started + {n_cancelled_total - n_cancelled_slots} mid-flight) — "
+            f"will be excluded from GRPO group stats"
+        )
 
     # Tidy up tmp dir (logs are kept; tmp is transient)
     shutil.rmtree(tmp_dir, ignore_errors=True)
