@@ -31,6 +31,15 @@ logger = logging.getLogger(__name__)
 OPENHANDS_RUN = PROJECT_DIR / "examples" / "agents" / "openhands" / "run.py"
 UV_BIN = os.path.expanduser("~/.local/bin/uv")
 
+# APRIL-style scheduler shared state. The execute_strategies() driver flips
+# _STOP_EVENT when its early-stop heuristic fires; in-flight workers in
+# _run_single() poll this between proc.wait() ticks and SIGTERM their child
+# subprocess if it's set. _ACTIVE_PROCS lets the driver also fan-out a
+# pkill from the outside in case workers are mid-poll.
+_ACTIVE_PROCS: dict[int, "subprocess.Popen"] = {}
+_ACTIVE_PROCS_LOCK = threading.Lock()
+_STOP_EVENT = threading.Event()
+
 
 @dataclass
 class ExecutionResult:
@@ -188,8 +197,40 @@ def _run_single(
             env=env,
             start_new_session=True,  # Own process group for clean kill
         )
-        proc.wait(timeout=config.executor_timeout + 300)
-        returncode = proc.returncode
+        with _ACTIVE_PROCS_LOCK:
+            _ACTIVE_PROCS[idx] = proc
+        # Stop-aware wait. Poll proc.wait() in short slices so the APRIL
+        # stop event can preempt long subprocesses.
+        deadline = time.monotonic() + config.executor_timeout + 300
+        cancelled_by_stop = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(cmd, config.executor_timeout + 300)
+            try:
+                proc.wait(timeout=min(5.0, remaining))
+                returncode = proc.returncode
+                break
+            except subprocess.TimeoutExpired:
+                if _STOP_EVENT.is_set():
+                    cancelled_by_stop = True
+                    logger.info(f"[{idx+1}/{total}] {strategy.task_id} APRIL-cancelled (stop event)")
+                    try:
+                        os.killpg(os.getpgid(proc.pid), 15)  # SIGTERM first
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(os.getpgid(proc.pid), 9)
+                        except (ProcessLookupError, PermissionError):
+                            pass
+                        proc.wait(timeout=5)
+                    returncode = proc.returncode
+                    break
+                # not stopping; loop back and keep waiting
+                continue
     except subprocess.TimeoutExpired:
         logger.warning(f"[{idx+1}/{total}] {strategy.task_id} timed out — killing process group")
         if proc is not None:
@@ -206,6 +247,8 @@ def _run_single(
             except (ProcessLookupError, PermissionError):
                 pass
     finally:
+        with _ACTIVE_PROCS_LOCK:
+            _ACTIVE_PROCS.pop(idx, None)
         try:
             os.unlink(prompt_file.name)
         except OSError:
@@ -360,6 +403,22 @@ def execute_strategies(
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return [r for r in results if r is not None]
 
+    # APRIL early-stop bookkeeping. Per-task completed-rollout counter; the
+    # round can stop once a target fraction of tasks have at least K_min
+    # completed rollouts, OR when the wall-clock cap fires.
+    from collections import defaultdict
+    task_completed: dict[str, int] = defaultdict(int)
+    n_tasks = len({strategies[i].task_id for i in pending})
+    round_start = time.monotonic()
+    round_max_wall = config.executor_round_max_wall_seconds
+    round_min_wall = config.executor_round_min_wall_seconds
+    completion_threshold = config.executor_completion_threshold
+    K_min = config.executor_min_rollouts_per_task
+    april_enabled = round_max_wall > 0
+    stop_reason: str | None = None
+
+    _STOP_EVENT.clear()  # fresh round
+
     with ThreadPoolExecutor(max_workers=config.executor_parallel) as pool:
         futures = {
             pool.submit(
@@ -384,6 +443,52 @@ def execute_strategies(
             results[idx] = result
             if result.trajectory_path is not None and result.trajectory_path.exists():
                 _append_exec_checkpoint(ckpt_path, idx, result, ckpt_lock)
+                task_completed[strategies[idx].task_id] += 1
+
+            # APRIL early-stop check (only after at least one full result)
+            if april_enabled and not _STOP_EVENT.is_set():
+                elapsed = time.monotonic() - round_start
+                tasks_with_kmin = sum(1 for c in task_completed.values() if c >= K_min)
+                frac_ok = tasks_with_kmin / max(n_tasks, 1)
+                if elapsed >= round_max_wall:
+                    stop_reason = (
+                        f"wall budget hit ({int(elapsed)}s ≥ {round_max_wall}s); "
+                        f"{tasks_with_kmin}/{n_tasks} tasks have ≥{K_min} rollouts"
+                    )
+                elif frac_ok >= completion_threshold and elapsed >= round_min_wall:
+                    stop_reason = (
+                        f"completion threshold met "
+                        f"({tasks_with_kmin}/{n_tasks}={frac_ok:.0%} ≥ {completion_threshold:.0%}) "
+                        f"after {int(elapsed)}s; cancelling tail"
+                    )
+                if stop_reason:
+                    logger.warning(f"APRIL stop: {stop_reason}")
+                    _STOP_EVENT.set()
+                    # Signal in-flight subprocesses now (workers also poll
+                    # _STOP_EVENT, but this gets the SIGTERM out faster).
+                    with _ACTIVE_PROCS_LOCK:
+                        for p in list(_ACTIVE_PROCS.values()):
+                            try:
+                                os.killpg(os.getpgid(p.pid), 15)
+                            except (ProcessLookupError, PermissionError):
+                                pass
+
+    # Fill any still-None slots with a CANCELLED marker so callers (scoring,
+    # reward) see a uniform list and downstream GRPO can drop those samples.
+    n_cancelled = 0
+    for i in range(len(strategies)):
+        if results[i] is None:
+            n_cancelled += 1
+            results[i] = ExecutionResult(
+                strategy=strategies[i],
+                agent_id="",
+                trajectory_path=None,
+                wall_seconds=int(time.monotonic() - round_start),
+                subprocess_returncode=None,
+                log_dir=log_dir,
+            )
+    if n_cancelled:
+        logger.warning(f"APRIL: {n_cancelled} rollouts ended without trajectory")
 
     # Tidy up tmp dir (logs are kept; tmp is transient)
     shutil.rmtree(tmp_dir, ignore_errors=True)

@@ -50,8 +50,31 @@ class Config:
     executor_model:    str = "openai/Qwen/Qwen3.5-27B"
     executor_base_url: str = "http://localhost:8001/v1"
     executor_api_key:  str = "EMPTY"
-    executor_parallel: int = 64
+    executor_parallel: int = 32   # 64 -> 32: vLLM prefill queue depth analysis on
+                                  # Qwen3.5-27B 200-task eval showed 688 individual
+                                  # steps >60s (cumulative 36.5h, ~27% of wall) when
+                                  # 64 rollouts hit one TP=8 vLLM concurrently.
+                                  # 32 keeps continuous-batching busy without queueing.
     executor_timeout:  int = 2400
+
+    # APRIL-style early-stop: cap a round's executor phase by wall-clock and by
+    # per-task completion fraction; cancel the long tail to keep round time
+    # bounded by the median rather than P99. Set
+    # executor_round_max_wall_seconds=0 to disable (sync wait-for-all behavior).
+    # When stop fires, in-flight subprocesses are SIGTERM'd via their pgrp and
+    # cancelled rollouts are recorded as ExecutionResult(trajectory_path=None,
+    # status=CANCELLED) so downstream scoring sees them as failures.
+    executor_round_max_wall_seconds: int = 1800       # hard cap per round
+    executor_completion_threshold: float = 0.85       # fraction of tasks that need
+                                                      # ≥ K_min completed rollouts
+                                                      # to allow early termination
+    executor_min_rollouts_per_task: int = 5           # K_min (vs group_size=8);
+                                                      # below this a task is skipped
+                                                      # by the APRIL stop check
+    executor_round_min_wall_seconds: int = 600        # don't stop early in the first
+                                                      # 10 min even if threshold met
+                                                      # (avoids false-positive stops
+                                                      # from fast-pass clusters)
     executor_max_iter: int = 72
     executor_max_output_tokens: int = 4096
     executor_temperature: float = 0.7  # paper says OpenHands default = 0.7
