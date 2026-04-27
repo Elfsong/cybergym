@@ -198,6 +198,15 @@ def _run_single(
 
     # Use Popen for explicit kill on timeout (subprocess.run doesn't kill children)
     proc = None
+    # Hoisted out of the try block: _docker_rate_limit() can raise the
+    # "aborted by APRIL stop event before Docker launch" RuntimeError before
+    # the inner cancelled_by_stop assignment is reached, and the result
+    # constructor at the bottom of the function reads this variable
+    # unconditionally. Without this initialization that path crashes with
+    # UnboundLocalError, which the outer execute_strategies loop then logs
+    # as a "Strategy N raised" — misclassifying the rollout as a generic
+    # exception (cancelled=False) and letting it pollute GRPO group stats.
+    cancelled_by_stop = False
     try:
         cmd = [
             UV_BIN, "run", "python3", str(OPENHANDS_RUN),
@@ -283,6 +292,15 @@ def _run_single(
             proc.wait(timeout=10)
     except Exception as e:
         logger.warning(f"[{idx+1}/{total}] {strategy.task_id} error: {e}")
+        # If the round-level stop event was set, classify the rollout as an
+        # APRIL cancellation regardless of whether the failure point was
+        # before or after Docker launch. Without this, pre-launch aborts
+        # ("aborted by APRIL stop event before Docker launch" raised by
+        # _docker_rate_limit) reach the result constructor with
+        # cancelled=False and pollute GRPO per-task mean/std as zero-reward
+        # failures rather than being filtered out.
+        if _STOP_EVENT.is_set():
+            cancelled_by_stop = True
         if proc is not None:
             try:
                 os.killpg(os.getpgid(proc.pid), 9)
