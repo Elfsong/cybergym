@@ -50,11 +50,13 @@ class Config:
     executor_model:    str = "openai/Qwen/Qwen3.5-27B"
     executor_base_url: str = "http://localhost:8001/v1"
     executor_api_key:  str = "EMPTY"
-    executor_parallel: int = 32   # 64 -> 32: vLLM prefill queue depth analysis on
-                                  # Qwen3.5-27B 200-task eval showed 688 individual
-                                  # steps >60s (cumulative 36.5h, ~27% of wall) when
-                                  # 64 rollouts hit one TP=8 vLLM concurrently.
-                                  # 32 keeps continuous-batching busy without queueing.
+    executor_parallel: int = 48   # 32 -> 48: round 1 produced 12/48 tasks at K_min=5
+                                  # — bottleneck was rollout count (384) vs 40-min
+                                  # budget @ 32-parallel × 12-min median. Bumping to
+                                  # 48 lifts theoretical throughput ~50%. Earlier
+                                  # 64-parallel analysis (200-task eval) saw vLLM
+                                  # queue blow-up; 48 is the midpoint to re-test
+                                  # under TP=8 + max-num-seqs=72.
     executor_timeout:  int = 2400
 
     # APRIL-style early-stop: cap a round's executor phase by wall-clock and by
