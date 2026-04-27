@@ -7,8 +7,8 @@ and checks that:
   - NO_SUBMIT tasks → milestone 0-2
 
 Usage:
-    uv run python -m dual_loops.validate_milestone
-    uv run python -m dual_loops.validate_milestone --verify-fix
+    uv run python -m dual_loops.tools.validate_milestone
+    uv run python -m dual_loops.tools.validate_milestone --verify-fix
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import os
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from .reward import detect_milestone
+from ..reward import detect_milestone
 
 
 def classify_ground_truth(traj_path: Path) -> str:

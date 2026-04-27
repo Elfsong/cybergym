@@ -158,12 +158,8 @@ def _run_single(
     config: Config,
     log_dir: Path,
     tmp_dir: Path,
-    stagger: float = 0.5,
 ) -> ExecutionResult:
     """Run one strategy through OpenHands + MiniMax."""
-    # Note: legacy `stagger` (idx-based linear delay) replaced by the global
-    # docker rate limiter below. We keep the param for API compat but ignore.
-    del stagger
 
     agent_id = uuid4().hex
     task_norm = strategy.task_id.replace(":", "_")
@@ -469,7 +465,10 @@ def execute_strategies(
     # completed rollouts, OR when the wall-clock cap fires.
     from collections import defaultdict
     task_completed: dict[str, int] = defaultdict(int)
-    n_tasks = len({strategies[i].task_id for i in pending})
+    for r in done.values():
+        if r.trajectory_path is not None and r.trajectory_path.exists():
+            task_completed[r.strategy.task_id] += 1
+    n_tasks = len({s.task_id for s in strategies})
     round_start = time.monotonic()
     round_max_wall = config.executor_round_max_wall_seconds
     round_min_wall = config.executor_round_min_wall_seconds

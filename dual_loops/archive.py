@@ -68,13 +68,13 @@ class Archive:
     _V2_FIELDS = (
         "round", "group_id", "adherence", "insight",
         "n_thinking_tokens", "n_strategy_tokens",
-        "trajectory_path", "run_id", "timestamp",
+        "trajectory_path", "run_id", "timestamp", "reflection_mode",
     )
 
     def append(self, record: dict) -> None:
         """Add one record. Required: task_id, strategy, milestone.
         Optional v2 fields: round, group_id, adherence, trajectory_path,
-        run_id, timestamp (pass-through to JSONL).
+        run_id, timestamp, reflection_mode (pass-through to JSONL).
         """
         rec: dict = {
             "task_id":   record["task_id"],

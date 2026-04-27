@@ -17,33 +17,46 @@ Trains a Qwen3.5-27B LoRA planner via GRPO, using MiniMax-M2.5 (self-hosted vLLM
 | `prompts.py` | Planner system/user templates + executor strategy injection |
 | `planner.py` | Tinker LoRA client: `generate_strategies()`, `grpo_update()`, `save_checkpoint()` |
 | `executor.py` | Parallel OpenHands subprocess per strategy, strategy injected via `--prompt_file` |
-| `reward.py` | Milestone 0-7 detection + CyberGym fix-build verification |
+| `milestones.py` | Milestone 0-7 detection + CyberGym fix-build verification |
+| `reflection.py` | Trajectory summarization + judge scoring |
+| `reward.py` | Thin reward API + composite reward formula |
 | `archive.py` | JSONL experience store + tournament-selection retrieval |
 | `utils.py` | Helpers: logging, task loading, JSON/JSONL I/O |
-| `train.py` | Main loop: generate → execute → score → GRPO → checkpoint |
-| `validate_milestone.py` | Sanity-check milestone detection on existing trajectories |
-| `dry_run.py` | Test executor + reward without Tinker (uses hand-written strategies) |
+| `rounds.py` | Per-round pipeline: generate → execute → score → GRPO |
+| `train.py` | Training entrypoint, resume, CLI |
+| `tools/validate_milestone.py` | Sanity-check milestone detection on existing trajectories |
+| `tools/dry_run.py` | Test executor + reward without Tinker (uses hand-written strategies) |
 
 ## Usage
 
 ### Dry-run (validate executor/reward pipeline)
 ```bash
-uv run python -m dual_loops.dry_run --task-ids arvo:8933 arvo:13704
+uv run python -m dual_loops.tools.dry_run --task-ids arvo:8933 arvo:13704
 ```
 
 ### Validate milestone detection
 ```bash
-uv run python -m dual_loops.validate_milestone
+uv run python -m dual_loops.tools.validate_milestone
 ```
 
 ### Full training
 ```bash
-uv run python -m dual_loops.train --num-rounds 6 --batch-size 48 --num-substeps 6
+uv run python -m dual_loops.train --num-rounds 6 --batch-size 48 --mini-batch-size 8
+```
+
+### Full training with the experience archive enabled
+```bash
+uv run python -m dual_loops.train --num-rounds 6 --batch-size 48 --mini-batch-size 8 --archive
+```
+
+### Milestone-only reward, but still collect judge outputs into the archive
+```bash
+uv run python -m dual_loops.train --num-rounds 6 --batch-size 48 --mini-batch-size 8 --archive --judge-archive-only
 ```
 
 ### Ablation: turn off the archive
 ```bash
-uv run python -m dual_loops.train --num-rounds 6 --batch-size 48 --num-substeps 6 --no-archive
+uv run python -m dual_loops.train --num-rounds 6 --batch-size 48 --mini-batch-size 8 --no-archive
 ```
 
 ## Milestones (paper Table 2)
@@ -77,7 +90,7 @@ dual_loops_runs/{run_id}/
 │   └── ...
 └── round_000/
     ├── strategies.json            # all K*N generated strategies (text + metadata)
-    ├── rewards.jsonl              # per-strategy (reward, milestone)
+    ├── rewards.jsonl              # per-strategy reward + milestone + judge metadata
     ├── metrics.json               # round-level aggregated metrics
     └── logs/                      # OpenHands trajectories per strategy
         └── {task_norm}-{agent_id}/
@@ -93,6 +106,9 @@ an archive retrieved on the next round's planner prompt. Composite reward:
     r = a · r_milestone + λ · a + γ_t · f_think + γ_s · f_strat
 
 where `a` is the reflection judge's adherence score and `λ, γ_t, γ_s`
-default to 0.5, 0, 0. Ablations: `--no-archive` disables the archive;
-`--lambda-adherence 0` removes the adherence bonus (but the gate still
-applies through `a · r_milestone`).
+default to `0.0`, `0.0`, `0.1` in the current config. The archive is opt-in
+via `--archive`; `--no-archive` disables it explicitly. When
+`--lambda-adherence 0`, reward is milestone + length terms only. Add
+`--judge-archive-only` if you still want judge-produced `adherence` and
+`insight` written to `rewards.jsonl` / `archive.jsonl` without feeding them
+into GRPO reward.

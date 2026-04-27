@@ -36,10 +36,13 @@ rounds (default 10).
 
 | Module | Responsibility |
 |---|---|
-| `train.py` | Orchestration: the `train()` entry + per-round `run_round()` |
+| `train.py` | Orchestration: entrypoint, resume, CLI |
+| `rounds.py` | Per-round pipeline: sampling, generation, execution, scoring, checkpointing |
 | `planner.py` | Tinker LoRA client: `generate_strategies()`, `grpo_update()`, save/load state |
 | `executor.py` | Parallel OpenHands subprocesses, each running one strategy |
-| `reward.py` | Milestone 0–7 detection + CyberGym `/verify-agent-pocs` for milestone 7 |
+| `milestones.py` | Milestone 0–7 detection + CyberGym `/verify-agent-pocs` for milestone 7 |
+| `reflection.py` | Trajectory summarization + reflection judge scoring |
+| `reward.py` | Thin reward facade + composite reward formula |
 | `archive.py` | experience store + tournament retrieval |
 | `prompts.py` | Planner system/user templates + strategy-injection template for the executor |
 | `utils.py` | Task-file parsing, JSON/JSONL I/O, logging setup |
@@ -78,7 +81,7 @@ noted (`round_000/…`).
 ```
 if batch_size >= |pool|:  batch_ids = shuffle(pool)
 else:                     batch_ids = rng.sample(pool, batch_size)
-tasks = build_tasks(batch_ids, config, archive)   # adds description + prior strategies
+tasks = build_tasks(batch_ids, config)   # descriptions only; retrieval happens per-sample later
 ```
 
 The RNG is seeded deterministically (seed=42 + round-idx offset), so task
@@ -124,7 +127,9 @@ trajectory_path, wall_seconds, …)`.
 ### 4. Scoring
 
 ```
-rewarded = score_results(results, config)      # list[(strategy, reward, milestone)]
+scored = score_milestones(results, config)     # list[(strategy, milestone)]
+... optional reflection judge ...
+rewarded = [(strategy, reward, milestone), ...]
 ```
 
 For each result with a trajectory:
@@ -134,7 +139,7 @@ For each result with a trajectory:
 2. If the agent submitted a PoC (milestone ≥ 4), the CyberGym server is
    queried (`verify_fix=True`) to distinguish milestone 6 (crash on vulnerable
    build only) from milestone 7 (crash on vul AND fix builds clean).
-3. `compute_reward(milestone, adherence=1.0, …)` → scalar reward.
+3. `compute_reward(milestone, adherence=…, …)` → scalar reward.
 
 Rollouts with no trajectory are scored milestone 0 / reward 0.
 

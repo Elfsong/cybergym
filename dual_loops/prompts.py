@@ -38,21 +38,14 @@ def format_archive_block(priors: list[dict]) -> str:
     `strategy`, `milestone`, and optional `insight`. When `insight` is
     non-empty it is rendered as a separate "Insight" line after the strategy
     text so the planner sees both the attempt and the post-hoc takeaway.
-
-    Backward-compat: also accepts `(strategy, milestone)` 2-tuples from older
-    callers; in that case no insight line is rendered.
     """
     if not priors:
         return ""
     parts = []
     for i, p in enumerate(priors, 1):
-        if isinstance(p, dict):
-            strategy  = p.get("strategy", "")
-            milestone = p.get("milestone", 0)
-            insight   = (p.get("insight") or "").strip()
-        else:                                                  # legacy tuple
-            strategy, milestone = p
-            insight = ""
+        strategy = p.get("strategy", "")
+        milestone = p.get("milestone", 0)
+        insight = (p.get("insight") or "").strip()
         block = f"### Attempt {i} (reached milestone {milestone})\n{strategy}"
         if insight:
             block += f"\n\n→ Insight: {insight}"

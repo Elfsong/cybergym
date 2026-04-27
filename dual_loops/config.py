@@ -144,12 +144,12 @@ class Config:
     # "none" | "log1p" (→ 0..2.56) | "sqrt" (→ 0..3.46). Reduces milestone=7
     # outlier dominance of intra-group advantages.
     reward_compression: str = "none"
-    lambda_adherence: float = 0.0    # adherence-bonus weight in the composite reward
-                                     # (0.0 → judge phase skipped, adherence forced to
-                                     # 1.0, reward = pure r_milestone. Was 0.5 — but
-                                     # 60-80% imputation rate at base policy made the
-                                     # signal unreliable, dropped to isolate milestone
-                                     # learning.)
+    lambda_adherence: float = 0.0    # adherence-bonus weight in the composite reward.
+                                     # With the current milestone-only default (0.0),
+                                     # the judge affects reward only if explicitly
+                                     # re-enabled. See `judge_archive_only` below for
+                                     # the cheaper mode that records adherence/insight
+                                     # to the archive without feeding them into reward.
     gamma_thinking: float = 0.0      # reward weight on f_think = min(n_think/ref, 1)
     gamma_strategy: float = 0.1      # reward weight on f_strat. NOTE: f_strat is now
                                      # max(0, 1 - n_strat/ref) — REWARDS SHORT strategies
@@ -191,6 +191,10 @@ class Config:
     judge_parallel: int = 64            # Max concurrent judge chat completions;
                                         # sibling of planner_parallel and
                                         # executor_parallel.
+    judge_archive_only: bool = False    # Run the reflection judge even when
+                                        # lambda_adherence == 0, but ONLY to
+                                        # populate archive / rewards metadata.
+                                        # Reward remains milestone + length terms.
     judge_max_traj_chars:   int = 16000 # Hard cap passed to summarize_trajectory
                                         # before the summary is handed to the judge.
     reflection_max_tokens:  int = 8192  # max_tokens for the judge's chat call;
