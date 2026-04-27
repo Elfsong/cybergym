@@ -64,8 +64,8 @@ class Config:
     # When stop fires, in-flight subprocesses are SIGTERM'd via their pgrp and
     # cancelled rollouts are recorded as ExecutionResult(trajectory_path=None,
     # status=CANCELLED) so downstream scoring sees them as failures.
-    executor_round_max_wall_seconds: int = 1800       # hard cap per round
-    executor_completion_threshold: float = 0.85       # fraction of tasks that need
+    executor_round_max_wall_seconds: int = 2400       # hard cap per round
+    executor_completion_threshold: float = 0.80       # fraction of tasks that need
                                                       # ≥ K_min completed rollouts
                                                       # to allow early termination
     executor_min_rollouts_per_task: int = 5           # K_min (vs group_size=8);
