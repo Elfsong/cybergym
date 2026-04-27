@@ -46,12 +46,6 @@ class Task:
     """One CyberGym task with the vulnerability description."""
     task_id: str
     description: str
-    # Legacy field — no longer populated by build_tasks. Retrieval has moved
-    # into generate_strategies (one draw per sample, not once per task) so
-    # that each of the K prompts for this task sees a different subset of
-    # priors. Kept on the dataclass only for forward-compat with any code
-    # still reading the attribute.
-    prior_strategies: list[tuple[str, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -331,13 +325,20 @@ class Planner:
         Returns (task_datums, summary) where
           task_datums maps task_id -> list[tinker.Datum]  (degenerate groups omitted)
           summary has {used, degenerate, total_groups, frac_degenerate, mean_reward,
-                       n_cancelled_dropped}.
+                       n_cancelled_kept}.
 
-        APRIL handling: if cancelled_mask is provided, those samples are excluded
-        BEFORE computing per-task mean/std. Their pseudo-reward (often 0.0 from
-        a missing trajectory) is missing-not-failed; including it would
-        systematically depress the group mean and bias the planner toward
-        whatever style of strategy happens to finish fastest.
+        APRIL-cancelled rollouts (cancelled_mask=True) are KEPT in the group with
+        their (small) reward intact. Earlier we filtered them out under the
+        rationale "missing-not-failed", but that created a survivor-bias loop:
+        the planner generated wider/slower strategies, executor cancellations
+        rose, the cancelled rollouts contributed zero gradient, and only fast-
+        completing rollouts shaped the policy. With cancelled kept in-group,
+        they contribute their actual (low, often near-zero from m=0) reward to
+        the group mean, so any strategy that reliably leads to APRIL-cancellation
+        receives a negative group-relative advantage and the policy is pushed
+        away from it. Diagnosis credit: codex (gpt-5.4) on 2026-04-27 spotted
+        the survivor bias from pass_rate↓ + mean_reward↑ + used_datums↓ across
+        run e4a0ce10's R1-R4.
         """
         from collections import defaultdict
 
@@ -350,11 +351,10 @@ class Planner:
             )
 
         groups: dict[str, list[tuple[StrategyToExecute, float]]] = defaultdict(list)
-        n_cancelled_dropped = 0
+        n_cancelled_kept = 0
         for (strat, reward), is_cancelled in zip(strategies_with_rewards, cancelled_mask):
             if is_cancelled:
-                n_cancelled_dropped += 1
-                continue
+                n_cancelled_kept += 1
             groups[strat.task_id].append((strat, reward))
 
         task_datums: dict[str, list] = {}
@@ -452,7 +452,7 @@ class Planner:
             "degenerate": n_degenerate,
             "total_groups": len(groups),
             "frac_degenerate": n_degenerate / max(len(groups), 1),
-            "n_cancelled_dropped": n_cancelled_dropped,
+            "n_cancelled_kept": n_cancelled_kept,
             "mean_reward": sum(rewards_all) / max(len(rewards_all), 1),
             "reward_stats":       _stats(rewards_all),
             "group_reward_std":   _stats(group_reward_stds),
