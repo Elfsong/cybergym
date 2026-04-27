@@ -50,13 +50,15 @@ class Config:
     executor_model:    str = "openai/Qwen/Qwen3.5-27B"
     executor_base_url: str = "http://localhost:8001/v1"
     executor_api_key:  str = "EMPTY"
-    executor_parallel: int = 48   # 32 -> 48: round 1 produced 12/48 tasks at K_min=5
-                                  # — bottleneck was rollout count (384) vs 40-min
-                                  # budget @ 32-parallel × 12-min median. Bumping to
-                                  # 48 lifts theoretical throughput ~50%. Earlier
-                                  # 64-parallel analysis (200-task eval) saw vLLM
-                                  # queue blow-up; 48 is the midpoint to re-test
-                                  # under TP=8 + max-num-seqs=72.
+    executor_parallel: int = 64   # 32 -> 48 -> 64: round 1 (run 2b7eb258) produced
+                                  # 12/48 tasks at K_min=5 with 70% APRIL cancel rate.
+                                  # Pairing with batch_size=32 keeps total rollouts at
+                                  # 32×8=256, matched by 64-parallel × 40min ÷ 712s
+                                  # median = 216 expected completions. Earlier 200-task
+                                  # eval with parallel=64 saw vLLM queue blow-up (688
+                                  # steps >60s cumulative); to monitor on this run check
+                                  # P99 LLM call latency and median rollout wall — if
+                                  # median >900s (vs current 712s), back off to 48.
     executor_timeout:  int = 2400
 
     # APRIL-style early-stop: cap a round's executor phase by wall-clock and by
@@ -91,7 +93,12 @@ class Config:
 
     # --- GRPO training ---
     group_size: int = 8               # K rollouts per task (intra-group GRPO)
-    batch_size: int = 48             # tasks per round (task groups per round)
+    batch_size: int = 32             # tasks per round (task groups per round).
+                                     # 48 -> 32 paired with executor_parallel=64:
+                                     # 32×8=256 rollouts vs 64-parallel × 40min ÷
+                                     # 712s = ~216 completions, so most rollouts
+                                     # finish within budget instead of being
+                                     # APRIL-cancelled.
     mini_batch_size: int = 8         # task groups per GRPO mini-batch.
                                      # Substeps per round are derived: S = ceil(batch_size / mini_batch_size).
     grad_accum: int = 4
