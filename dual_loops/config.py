@@ -75,6 +75,13 @@ class Config:
                                                       # 10 min even if threshold met
                                                       # (avoids false-positive stops
                                                       # from fast-pass clusters)
+
+    # Docker container launch rate limit. With 32 parallel rollouts each
+    # spawning an OpenHands runtime image + per-task CyberGym sandbox, dockerd
+    # saturates and ~82% of rollouts die at runtime-init with no trajectory
+    # ("CRASH"). 5s per launch keeps the daemon happy and shifts the bottleneck
+    # back to the agent loop where it belongs. Set to 0 to disable.
+    executor_docker_stagger_seconds: float = 5.0
     executor_max_iter: int = 72
     executor_max_output_tokens: int = 4096
     executor_temperature: float = 0.7  # paper says OpenHands default = 0.7

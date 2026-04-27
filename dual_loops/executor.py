@@ -40,6 +40,15 @@ _ACTIVE_PROCS: dict[int, "subprocess.Popen"] = {}
 _ACTIVE_PROCS_LOCK = threading.Lock()
 _STOP_EVENT = threading.Event()
 
+# Global Docker container launch rate limiter. With 32 parallel rollouts each
+# pulling an OpenHands runtime image and starting a per-task CyberGym
+# container, the dockerd daemon hits its concurrent-build budget and rollouts
+# CRASH (no trajectory; observed 82% CRASH rate without rate limiting).
+# Serialize new container launches: at most one Popen every
+# config.executor_docker_stagger_seconds across the entire pool.
+_DOCKER_LAUNCH_LOCK = threading.Lock()
+_LAST_DOCKER_LAUNCH_TS = 0.0
+
 
 @dataclass
 class ExecutionResult:
@@ -119,6 +128,29 @@ def _cleanup_docker_containers(prefix: str = "openhands-runtime-") -> int:
         return 0
 
 
+def _docker_rate_limit(min_interval_s: float) -> None:
+    """Block until at least `min_interval_s` has elapsed since the last
+    container launch. Serializes Docker startup across the worker pool so
+    dockerd doesn't get overwhelmed. Called immediately before Popen so the
+    delay sits between sibling launches, not at task arrival.
+    """
+    global _LAST_DOCKER_LAUNCH_TS
+    if min_interval_s <= 0:
+        return
+    with _DOCKER_LAUNCH_LOCK:
+        now = time.monotonic()
+        wait = (_LAST_DOCKER_LAUNCH_TS + min_interval_s) - now
+        if wait > 0:
+            # While waiting, periodically check stop event so we don't
+            # block APRIL cancellation behind a long Docker queue.
+            t_end = now + wait
+            while time.monotonic() < t_end:
+                if _STOP_EVENT.is_set():
+                    raise RuntimeError("aborted by APRIL stop event before Docker launch")
+                time.sleep(min(0.5, t_end - time.monotonic()))
+        _LAST_DOCKER_LAUNCH_TS = time.monotonic()
+
+
 def _run_single(
     idx: int,
     total: int,
@@ -129,8 +161,9 @@ def _run_single(
     stagger: float = 0.5,
 ) -> ExecutionResult:
     """Run one strategy through OpenHands + MiniMax."""
-    if stagger > 0:
-        time.sleep(idx * stagger)
+    # Note: legacy `stagger` (idx-based linear delay) replaced by the global
+    # docker rate limiter below. We keep the param for API compat but ignore.
+    del stagger
 
     agent_id = uuid4().hex
     task_norm = strategy.task_id.replace(":", "_")
@@ -192,6 +225,11 @@ def _run_single(
             "LLM_API_KEY": config.executor_api_key or "EMPTY",
             "TMPDIR": str(tmp_dir),  # Force subprocesses to use round tmp, not /tmp
         }
+        # Rate-limit Docker container starts (each OpenHands subprocess
+        # launches its own runtime container + the per-task CyberGym sandbox).
+        # Without this, 32 simultaneous launches saturate dockerd and most
+        # rollouts CRASH at the runtime-init stage with no trajectory.
+        _docker_rate_limit(config.executor_docker_stagger_seconds)
         proc = subprocess.Popen(
             cmd,
             stderr=subprocess.DEVNULL,
@@ -420,9 +458,78 @@ def execute_strategies(
     completion_threshold = config.executor_completion_threshold
     K_min = config.executor_min_rollouts_per_task
     april_enabled = round_max_wall > 0
-    stop_reason: str | None = None
+    stop_reason_box: list[str] = []  # mutable via closures
+    stop_lock = threading.Lock()
 
     _STOP_EVENT.clear()  # fresh round
+
+    def _trigger_stop(reason: str) -> None:
+        """Atomic: flip stop event, fan out SIGTERM, sweep orphan containers.
+        Idempotent — safe to call from both the as_completed loop and the
+        watchdog thread without racing.
+        """
+        with stop_lock:
+            if _STOP_EVENT.is_set():
+                return
+            _STOP_EVENT.set()
+            stop_reason_box.append(reason)
+        logger.warning(f"APRIL stop: {reason}")
+        # Fan-out SIGTERM to all in-flight subprocesses concurrently. Workers
+        # also poll _STOP_EVENT, but the explicit signal here gets termination
+        # going immediately rather than waiting for each worker's next 5s
+        # poll tick.
+        with _ACTIVE_PROCS_LOCK:
+            procs = list(_ACTIVE_PROCS.values())
+        for p in procs:
+            try:
+                os.killpg(os.getpgid(p.pid), 15)
+            except (ProcessLookupError, PermissionError):
+                pass
+        # Docker container sweep so orphans don't accumulate across rounds.
+        try:
+            n_orphans = _cleanup_docker_containers()
+            if n_orphans:
+                logger.warning(f"APRIL stop: removed {n_orphans} orphaned Docker containers")
+        except Exception as e:
+            logger.warning(f"APRIL stop: docker cleanup failed: {e}")
+
+    def _april_watchdog() -> None:
+        """Background thread that checks stop conditions on a wall clock,
+        independent of how often futures complete. Without this, a round
+        full of slow rollouts can hold the as_completed loop quiet for an
+        hour and APRIL never gets a chance to fire.
+        """
+        if not april_enabled:
+            return
+        while not _STOP_EVENT.is_set():
+            elapsed = time.monotonic() - round_start
+            tasks_with_kmin = sum(1 for c in task_completed.values() if c >= K_min)
+            frac_ok = tasks_with_kmin / max(n_tasks, 1)
+            if elapsed >= round_max_wall:
+                _trigger_stop(
+                    f"wall budget hit ({int(elapsed)}s ≥ {round_max_wall}s); "
+                    f"{tasks_with_kmin}/{n_tasks} tasks have ≥{K_min} rollouts (watchdog)"
+                )
+                return
+            if frac_ok >= completion_threshold and elapsed >= round_min_wall:
+                _trigger_stop(
+                    f"completion threshold met "
+                    f"({tasks_with_kmin}/{n_tasks}={frac_ok:.0%} ≥ {completion_threshold:.0%}) "
+                    f"after {int(elapsed)}s (watchdog)"
+                )
+                return
+            # Sleep in short slices so we exit quickly when stop fires from
+            # the as_completed path (a completion-driven trigger races us).
+            for _ in range(20):
+                if _STOP_EVENT.is_set():
+                    return
+                time.sleep(0.5)
+
+    watchdog_thread = threading.Thread(
+        target=_april_watchdog, name="april-watchdog", daemon=True,
+    )
+    if april_enabled:
+        watchdog_thread.start()
 
     with ThreadPoolExecutor(max_workers=config.executor_parallel) as pool:
         futures = {
@@ -450,43 +557,25 @@ def execute_strategies(
                 _append_exec_checkpoint(ckpt_path, idx, result, ckpt_lock)
                 task_completed[strategies[idx].task_id] += 1
 
-            # APRIL early-stop check (only after at least one full result)
+            # Same conditions as the watchdog, evaluated on every completion.
+            # The watchdog drives most stops (especially when completions are
+            # rare), but this path catches the "fast-finish then idle" case
+            # before the next watchdog tick.
             if april_enabled and not _STOP_EVENT.is_set():
                 elapsed = time.monotonic() - round_start
                 tasks_with_kmin = sum(1 for c in task_completed.values() if c >= K_min)
                 frac_ok = tasks_with_kmin / max(n_tasks, 1)
                 if elapsed >= round_max_wall:
-                    stop_reason = (
+                    _trigger_stop(
                         f"wall budget hit ({int(elapsed)}s ≥ {round_max_wall}s); "
                         f"{tasks_with_kmin}/{n_tasks} tasks have ≥{K_min} rollouts"
                     )
                 elif frac_ok >= completion_threshold and elapsed >= round_min_wall:
-                    stop_reason = (
+                    _trigger_stop(
                         f"completion threshold met "
                         f"({tasks_with_kmin}/{n_tasks}={frac_ok:.0%} ≥ {completion_threshold:.0%}) "
                         f"after {int(elapsed)}s; cancelling tail"
                     )
-                if stop_reason:
-                    logger.warning(f"APRIL stop: {stop_reason}")
-                    _STOP_EVENT.set()
-                    # Signal in-flight subprocesses now (workers also poll
-                    # _STOP_EVENT, but this gets the SIGTERM out faster).
-                    with _ACTIVE_PROCS_LOCK:
-                        for p in list(_ACTIVE_PROCS.values()):
-                            try:
-                                os.killpg(os.getpgid(p.pid), 15)
-                            except (ProcessLookupError, PermissionError):
-                                pass
-                    # APRIL-cancelled subprocesses won't get a chance to clean
-                    # up the OpenHands docker containers they spawned (those
-                    # are dockerd's children, not Python's). Fan-out a
-                    # docker-rm sweep here so containers don't accumulate
-                    # across rounds and exhaust the daemon's resource budget.
-                    n_orphans = _cleanup_docker_containers()
-                    if n_orphans:
-                        logger.warning(
-                            f"APRIL stop: removed {n_orphans} orphaned Docker containers"
-                        )
 
     # Fill any still-None slots with a CANCELLED marker so callers (scoring,
     # reward) see a uniform list and downstream GRPO can drop those samples.
