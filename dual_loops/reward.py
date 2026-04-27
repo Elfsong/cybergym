@@ -919,7 +919,14 @@ def compute_reward(
     where f is the compression chosen by `reward_compression` ∈
     {"none", "log1p", "sqrt"}. Compression narrows the 0..12 milestone
     span so milestone=7 outliers don't dominate intra-group advantages.
-    Length terms saturate at 1.0.
+
+    Length terms:
+      f_think — rewards LONGER thinking (saturates at thinking_ref_tokens).
+                Encourages exploration of reasoning chains.
+      f_strat — rewards SHORTER strategy (1.0 at zero length, decays
+                linearly to 0 at strategy_ref_tokens). Encourages concise
+                actionable strategies; counters the verbosity / safety-
+                refusal-loop tail that was hitting max_strategy_tokens.
     """
     import math
     r_mile = MILESTONE_REWARDS[milestone]
@@ -930,7 +937,7 @@ def compute_reward(
     elif reward_compression != "none":
         raise ValueError(f"Unknown reward_compression: {reward_compression!r}")
     f_think = min(thinking_length / max(thinking_ref_tokens, 1), 1.0)
-    f_strat = min(strategy_length / max(strategy_ref_tokens, 1), 1.0)
+    f_strat = max(0.0, 1.0 - strategy_length / max(strategy_ref_tokens, 1))
     return (
         adherence * r_mile
         + lambda_adherence * adherence

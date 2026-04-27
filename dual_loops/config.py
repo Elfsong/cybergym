@@ -151,9 +151,21 @@ class Config:
                                      # signal unreliable, dropped to isolate milestone
                                      # learning.)
     gamma_thinking: float = 0.0      # reward weight on f_think = min(n_think/ref, 1)
-    gamma_strategy: float = 0.0      # reward weight on f_strat = min(n_strat/ref, 1)
+    gamma_strategy: float = 0.1      # reward weight on f_strat. NOTE: f_strat is now
+                                     # max(0, 1 - n_strat/ref) — REWARDS SHORT strategies
+                                     # (was the saturating-up form rewarding long). With
+                                     # γ=0.1 and r_milestone ∈ [0..12], the strategy term
+                                     # is at most 0.1 — a tiebreaker between equal-
+                                     # milestone rollouts, not a primary signal. Counter
+                                     # to the verbosity / safety-refusal-loop tail
+                                     # observed in run 2b7eb258 (~5% of strategies hit
+                                     # max_strategy_tokens=4096).
     thinking_ref_tokens: int = 3000  # saturation threshold for f_think (≈ observed p70)
-    strategy_ref_tokens: int = 500   # saturation threshold for f_strat (≈ observed p90)
+    strategy_ref_tokens: int = 500   # f_strat zero-out threshold (rewards taper from 1
+                                     # at n_strat=0 down to 0 at this cap). Observed
+                                     # round-1 distribution: median 400, p90 470, p95
+                                     # 520 — so median-length strategy gets f≈0.2,
+                                     # very-short (200 tok) gets f≈0.6.
 
     # --- Experience archive (always part of the architecture; flag present for ablations) ---
     archive_enabled: bool = False    # disabled to isolate milestone learning from
