@@ -184,20 +184,32 @@ async def run_round(
     scored = score_milestones(results, config)  # list[(strategy, milestone)]
 
     # 4b) Reflection judge → (adherence, insight) per rollout.
+    # When λ_adherence == 0 the reward is pure r_milestone, so the judge call
+    # is dead work. Skip it AND short-circuit insights to None so the archive
+    # append (if enabled) sees no inferred labels — keeps the run honest about
+    # what signal we actually trained on.
     from dual_loops.reward import score_reflection_batch
     t_adh = time.monotonic()
-    pairs = await score_reflection_batch(
-        results,
-        base_url=config.judge_base_url,
-        model=config.judge_model,
-        concurrency=config.judge_parallel,
-        max_traj_chars=config.judge_max_traj_chars,
-        max_tokens=config.reflection_max_tokens,
-        api_key=config.judge_api_key,
-        insight_max_tokens=config.insight_max_tokens,
-    )
-    adherences = [a for a, _ in pairs]
-    insights = [ins for _, ins in pairs]
+    if config.lambda_adherence == 0.0:
+        adherences = [1.0] * len(results)
+        insights = [""] * len(results)
+        logger.info(
+            f"Reflection: SKIPPED (λ_adherence=0.0); adherence forced to 1.0, "
+            f"reward reduces to r_milestone alone."
+        )
+    else:
+        pairs = await score_reflection_batch(
+            results,
+            base_url=config.judge_base_url,
+            model=config.judge_model,
+            concurrency=config.judge_parallel,
+            max_traj_chars=config.judge_max_traj_chars,
+            max_tokens=config.reflection_max_tokens,
+            api_key=config.judge_api_key,
+            insight_max_tokens=config.insight_max_tokens,
+        )
+        adherences = [a for a, _ in pairs]
+        insights = [ins for _, ins in pairs]
     adh_seconds = int(time.monotonic() - t_adh)
 
     # 4c) Compose reward ONCE with both milestone and adherence:

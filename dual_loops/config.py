@@ -144,14 +144,22 @@ class Config:
     # "none" | "log1p" (→ 0..2.56) | "sqrt" (→ 0..3.46). Reduces milestone=7
     # outlier dominance of intra-group advantages.
     reward_compression: str = "none"
-    lambda_adherence: float = 0.5    # adherence-bonus weight in the composite reward
+    lambda_adherence: float = 0.0    # adherence-bonus weight in the composite reward
+                                     # (0.0 → judge phase skipped, adherence forced to
+                                     # 1.0, reward = pure r_milestone. Was 0.5 — but
+                                     # 60-80% imputation rate at base policy made the
+                                     # signal unreliable, dropped to isolate milestone
+                                     # learning.)
     gamma_thinking: float = 0.0      # reward weight on f_think = min(n_think/ref, 1)
     gamma_strategy: float = 0.0      # reward weight on f_strat = min(n_strat/ref, 1)
     thinking_ref_tokens: int = 3000  # saturation threshold for f_think (≈ observed p70)
     strategy_ref_tokens: int = 500   # saturation threshold for f_strat (≈ observed p90)
 
     # --- Experience archive (always part of the architecture; flag present for ablations) ---
-    archive_enabled: bool = True
+    archive_enabled: bool = False    # disabled to isolate milestone learning from
+                                     # prior-strategy injection. With λ=0 + archive
+                                     # OFF, the planner has only the task description
+                                     # + GRPO updates as signal — no retrieval prior.
     archive_n: int = 3               # top-n strategies in context
     archive_tournament_size: int = 4
     archive_min_milestone: int = 3   # only retrieve strategies that submitted
