@@ -76,7 +76,8 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
     logger.info(
         f"GRPO: K={config.group_size}, batch={config.batch_size}, "
         f"mini_batch_size={config.mini_batch_size}, rounds={config.num_rounds}, "
-        f"lr={config.learning_rate}"
+        f"lr={config.learning_rate}, adv_norm={config.advantage_normalization}, "
+        f"reward_compression={config.reward_compression}"
     )
     logger.info(
         f"Archive: {'ON' if config.archive_enabled else 'OFF'} | "
@@ -214,6 +215,18 @@ def main() -> None:
     parser.add_argument("--thinking-ref-tokens", type=int, default=None)
     parser.add_argument("--strategy-ref-tokens", type=int, default=None)
     parser.add_argument("--insight-max-tokens", type=int, default=None)
+    parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument(
+        "--advantage-normalization",
+        choices=("mean_only", "mean_std", "clipped_std"),
+        default=None,
+    )
+    parser.add_argument("--advantage-std-floor", type=float, default=None)
+    parser.add_argument(
+        "--reward-compression",
+        choices=("none", "log1p", "sqrt"),
+        default=None,
+    )
     parser.add_argument("--planner-parallel", type=int, default=None)
     parser.add_argument("--judge-parallel", type=int, default=None)
     parser.add_argument("--executor-parallel", type=int, default=None)
@@ -292,6 +305,14 @@ def main() -> None:
         config.gamma_thinking = args.gamma_thinking
     if args.gamma_strategy is not None:
         config.gamma_strategy = args.gamma_strategy
+    if args.learning_rate is not None:
+        config.learning_rate = args.learning_rate
+    if args.advantage_normalization is not None:
+        config.advantage_normalization = args.advantage_normalization
+    if args.advantage_std_floor is not None:
+        config.advantage_std_floor = args.advantage_std_floor
+    if args.reward_compression is not None:
+        config.reward_compression = args.reward_compression
     if args.thinking_ref_tokens is not None:
         config.thinking_ref_tokens = args.thinking_ref_tokens
     if args.strategy_ref_tokens is not None:

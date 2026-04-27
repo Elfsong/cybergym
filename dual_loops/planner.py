@@ -529,9 +529,9 @@ class Planner:
         mini-batch). `mini_batch_size >= batch_size` recovers single-step behavior.
 
         cancelled_mask, if provided, is a boolean list parallel to
-        strategies_with_rewards; True entries are dropped from group statistics
-        (their reward is missing-not-failed). Used by APRIL early-stop scheduler
-        so cancelled rollouts don't bias group mean/std downward.
+        strategies_with_rewards; True entries are kept in group statistics with
+        their low reward. Used by the APRIL early-stop scheduler so cancelled
+        rollouts provide negative evidence instead of disappearing from GRPO.
 
         Returns summary metrics plus per-substep info.
         """

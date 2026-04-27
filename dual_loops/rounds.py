@@ -222,8 +222,8 @@ async def run_round(
     n_cancelled = sum(cancelled_mask)
     if n_cancelled:
         logger.info(
-            f"GRPO group filter: dropping {n_cancelled}/{len(cancelled_mask)} "
-            f"APRIL-cancelled rollouts before computing advantages"
+            f"GRPO group stats: keeping {n_cancelled}/{len(cancelled_mask)} "
+            f"APRIL-cancelled rollouts as low-reward samples"
         )
     metrics = await planner.grpo_update(
         [(strategy, reward) for strategy, reward, _ in rewarded],
@@ -292,6 +292,10 @@ async def run_round(
             "archive_size": archive_size,
             "mean_thinking_tokens": sum(think_lens) / max(len(think_lens), 1),
             "mean_strategy_tokens": sum(strat_lens) / max(len(strat_lens), 1),
+            "learning_rate": config.learning_rate,
+            "advantage_normalization": config.advantage_normalization,
+            "advantage_std_floor": config.advantage_std_floor,
+            "reward_compression": config.reward_compression,
             "gen_seconds": gen_seconds,
             "exec_seconds": exec_seconds,
             "adh_seconds": adh_seconds,
