@@ -13,7 +13,7 @@ from pathlib import Path
 from .archive import Archive
 from .config import Config
 from .planner import Planner
-from .rounds import run_round
+from .rounds import run_round, run_validation_round
 from .utils import parse_tasks_file, save_json, setup_logging
 
 logger = logging.getLogger("dual_loops.train")
@@ -56,6 +56,32 @@ def _load_existing_round_metrics(run_dir: Path, end_round_exclusive: int) -> lis
     return metrics
 
 
+def _load_existing_validation_metrics(run_dir: Path) -> list[dict]:
+    path = run_dir / "validation_metrics.json"
+    if not path.exists():
+        return []
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        logger.warning(f"Could not load prior validation metrics from {path}")
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _select_validation_task_ids(config: Config, all_task_ids: list[str]) -> list[str]:
+    if config.validation_tasks_file is not None:
+        task_ids = parse_tasks_file(config.validation_tasks_file)
+        if config.validation_batch_size > 0:
+            task_ids = task_ids[: config.validation_batch_size]
+        return task_ids
+    if config.validation_batch_size <= 0:
+        return []
+    rng = random.Random(config.validation_seed)
+    n = min(config.validation_batch_size, len(all_task_ids))
+    return rng.sample(all_task_ids, n)
+
+
 async def train(config: Config, resume_from: Path | None = None) -> None:
     """Run `config.num_rounds` rounds of iterative GRPO training."""
     start_round = 0
@@ -77,7 +103,9 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
         f"GRPO: K={config.group_size}, batch={config.batch_size}, "
         f"mini_batch_size={config.mini_batch_size}, rounds={config.num_rounds}, "
         f"lr={config.learning_rate}, adv_norm={config.advantage_normalization}, "
-        f"reward_compression={config.reward_compression}"
+        f"reward_compression={config.reward_compression}, "
+        f"skip_update={config.skip_grpo_update}, "
+        f"skip_uniform_milestone_groups={config.skip_uniform_milestone_groups}"
     )
     logger.info(
         f"Archive: {'ON' if config.archive_enabled else 'OFF'} | "
@@ -100,6 +128,15 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
     if not all_task_ids:
         raise RuntimeError(f"No tasks in {config.tasks_file}")
     logger.info(f"Task pool: {len(all_task_ids)} tasks")
+    validation_task_ids = _select_validation_task_ids(config, all_task_ids)
+    if validation_task_ids:
+        save_json(validation_task_ids, config.output_dir / "validation_task_ids.json")
+        logger.info(
+            f"Fixed validation: {len(validation_task_ids)} tasks, "
+            f"K={config.validation_group_size or config.group_size}, "
+            f"every={config.validation_every}, "
+            f"archive={'ON' if config.validation_use_archive else 'OFF'}"
+        )
 
     seed_paths: tuple[Path, ...] = ()
     if (
@@ -136,8 +173,32 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
             rng.sample(all_task_ids, config.batch_size)
 
     round_metrics = _load_existing_round_metrics(config.output_dir, start_round)
+    validation_metrics = _load_existing_validation_metrics(config.output_dir)
+    if validation_task_ids and start_round == 0:
+        metrics = await run_validation_round(
+            "pretrain", planner, archive, config, validation_task_ids
+        )
+        validation_metrics.append({"round": -1, **metrics})
+        save_json(validation_metrics, config.output_dir / "validation_metrics.json")
+
     for round_idx in range(start_round, config.num_rounds):
         metrics = await run_round(round_idx, planner, archive, config, all_task_ids, rng)
+        if (
+            validation_task_ids
+            and config.validation_every > 0
+            and (round_idx + 1) % config.validation_every == 0
+        ):
+            eval_metrics = await run_validation_round(
+                f"round_{round_idx:03d}",
+                planner,
+                archive,
+                config,
+                validation_task_ids,
+            )
+            metrics["fixed_eval"] = eval_metrics
+            save_json(metrics, config.output_dir / f"round_{round_idx:03d}" / "metrics.json")
+            validation_metrics.append({"round": round_idx, **eval_metrics})
+            save_json(validation_metrics, config.output_dir / "validation_metrics.json")
         round_metrics.append(metrics)
 
     save_json(round_metrics, config.output_dir / "all_metrics.json")
@@ -217,6 +278,11 @@ def main() -> None:
     parser.add_argument("--insight-max-tokens", type=int, default=None)
     parser.add_argument("--learning-rate", type=float, default=None)
     parser.add_argument(
+        "--skip-grpo-update",
+        action="store_true",
+        help="Execute and score rollouts, but skip forward_backward/optim_step.",
+    )
+    parser.add_argument(
         "--advantage-normalization",
         choices=("mean_only", "mean_std", "clipped_std"),
         default=None,
@@ -227,6 +293,19 @@ def main() -> None:
         choices=("none", "log1p", "sqrt"),
         default=None,
     )
+    parser.add_argument(
+        "--skip-uniform-milestone-groups",
+        dest="skip_uniform_milestone_groups",
+        action="store_true",
+        help="Skip task groups whose rollouts all reached the same milestone.",
+    )
+    parser.add_argument(
+        "--train-uniform-milestone-groups",
+        dest="skip_uniform_milestone_groups",
+        action="store_false",
+        help="Allow length/reward tie-breakers to train even when all milestones match.",
+    )
+    parser.set_defaults(skip_uniform_milestone_groups=None)
     parser.add_argument("--planner-parallel", type=int, default=None)
     parser.add_argument("--judge-parallel", type=int, default=None)
     parser.add_argument("--executor-parallel", type=int, default=None)
@@ -248,6 +327,16 @@ def main() -> None:
     )
     parser.add_argument("--strategy-temperature", type=float, default=None)
     parser.add_argument("--strategy-top-p", type=float, default=None)
+    parser.add_argument("--validation-tasks-file", type=Path, default=None)
+    parser.add_argument("--validation-batch-size", type=int, default=None)
+    parser.add_argument("--validation-group-size", type=int, default=None)
+    parser.add_argument("--validation-seed", type=int, default=None)
+    parser.add_argument("--validation-every", type=int, default=None)
+    parser.add_argument(
+        "--validation-use-archive",
+        action="store_true",
+        help="Use archive retrieval during fixed validation. Default isolates policy-only eval.",
+    )
     parser.add_argument("--train-root", type=Path, default=None)
     parser.add_argument("--resume-from", type=Path, default=None)
     args = parser.parse_args()
@@ -307,18 +396,34 @@ def main() -> None:
         config.gamma_strategy = args.gamma_strategy
     if args.learning_rate is not None:
         config.learning_rate = args.learning_rate
+    if args.skip_grpo_update:
+        config.skip_grpo_update = True
     if args.advantage_normalization is not None:
         config.advantage_normalization = args.advantage_normalization
     if args.advantage_std_floor is not None:
         config.advantage_std_floor = args.advantage_std_floor
     if args.reward_compression is not None:
         config.reward_compression = args.reward_compression
+    if args.skip_uniform_milestone_groups is not None:
+        config.skip_uniform_milestone_groups = args.skip_uniform_milestone_groups
     if args.thinking_ref_tokens is not None:
         config.thinking_ref_tokens = args.thinking_ref_tokens
     if args.strategy_ref_tokens is not None:
         config.strategy_ref_tokens = args.strategy_ref_tokens
     if args.insight_max_tokens is not None:
         config.insight_max_tokens = args.insight_max_tokens
+    if args.validation_tasks_file is not None:
+        config.validation_tasks_file = args.validation_tasks_file
+    if args.validation_batch_size is not None:
+        config.validation_batch_size = args.validation_batch_size
+    if args.validation_group_size is not None:
+        config.validation_group_size = args.validation_group_size
+    if args.validation_seed is not None:
+        config.validation_seed = args.validation_seed
+    if args.validation_every is not None:
+        config.validation_every = args.validation_every
+    if args.validation_use_archive:
+        config.validation_use_archive = True
 
     asyncio.run(train(config, resume_from=args.resume_from))
 

@@ -319,6 +319,7 @@ class Planner:
         eps: float,
         *,
         cancelled_mask: list[bool] | None = None,
+        milestones: list[int] | None = None,
     ) -> tuple[dict[str, list], dict]:
         """Compute per-task GRPO advantages and build datums grouped by task_id.
 
@@ -349,16 +350,28 @@ class Planner:
                 f"cancelled_mask length {len(cancelled_mask)} != "
                 f"strategies_with_rewards length {len(strategies_with_rewards)}"
             )
+        if milestones is not None and len(milestones) != len(strategies_with_rewards):
+            raise ValueError(
+                f"milestones length {len(milestones)} != "
+                f"strategies_with_rewards length {len(strategies_with_rewards)}"
+            )
 
-        groups: dict[str, list[tuple[StrategyToExecute, float]]] = defaultdict(list)
+        groups: dict[str, list[tuple[StrategyToExecute, float, int | None]]] = defaultdict(list)
         n_cancelled_kept = 0
-        for (strat, reward), is_cancelled in zip(strategies_with_rewards, cancelled_mask):
+        if milestones is None:
+            milestones_iter = [None] * len(strategies_with_rewards)
+        else:
+            milestones_iter = milestones
+        for (strat, reward), is_cancelled, milestone in zip(
+            strategies_with_rewards, cancelled_mask, milestones_iter
+        ):
             if is_cancelled:
                 n_cancelled_kept += 1
-            groups[strat.task_id].append((strat, reward))
+            groups[strat.task_id].append((strat, reward, milestone))
 
         task_datums: dict[str, list] = {}
         n_degenerate = 0
+        n_uniform_milestone_skipped = 0
         n_used = 0
         rewards_all: list[float] = []
         group_reward_stds: list[float] = []
@@ -366,14 +379,24 @@ class Planner:
 
         norm_mode = getattr(self.config, "advantage_normalization", "mean_std")
         std_floor = getattr(self.config, "advantage_std_floor", 0.3)
+        skip_uniform_milestones = (
+            milestones is not None
+            and getattr(self.config, "skip_uniform_milestone_groups", False)
+        )
 
         for tid, group in groups.items():
-            rewards = [r for _, r in group]
+            rewards = [r for _, r, _ in group]
             rewards_all.extend(rewards)
             mean_r = sum(rewards) / len(rewards)
             var_r = sum((r - mean_r) ** 2 for r in rewards) / len(rewards)
             std_r = var_r ** 0.5
             group_reward_stds.append(std_r)
+
+            if skip_uniform_milestones:
+                group_milestones = [m for _, _, m in group]
+                if len(set(group_milestones)) <= 1:
+                    n_uniform_milestone_skipped += 1
+                    continue
 
             if std_r < eps:
                 n_degenerate += 1
@@ -389,7 +412,7 @@ class Planner:
             advantages_all.extend(advantages)
             group_datums = []
 
-            for (strat, _), adv in zip(group, advantages):
+            for (strat, _, _), adv in zip(group, advantages):
                 if len(strat.tokens) < 2 or strat.prompt is None:
                     continue
 
@@ -450,8 +473,12 @@ class Planner:
         summary = {
             "used": n_used,
             "degenerate": n_degenerate,
+            "uniform_milestone_skipped": n_uniform_milestone_skipped,
             "total_groups": len(groups),
             "frac_degenerate": n_degenerate / max(len(groups), 1),
+            "frac_uniform_milestone_skipped": (
+                n_uniform_milestone_skipped / max(len(groups), 1)
+            ),
             "n_cancelled_kept": n_cancelled_kept,
             "mean_reward": sum(rewards_all) / max(len(rewards_all), 1),
             "reward_stats":       _stats(rewards_all),
@@ -519,6 +546,7 @@ class Planner:
         round_idx: int = 0,
         eps: float = 1e-8,
         cancelled_mask: list[bool] | None = None,
+        milestones: list[int] | None = None,
     ) -> dict:
         """Compute GRPO advantages per-task-group, build Datums, run one
         pipelined forward_backward + optim_step update per mini-batch
@@ -540,13 +568,43 @@ class Planner:
 
         # 1. Build per-task datums (degenerate groups dropped inside)
         task_datums, metrics = self._build_task_datums(
-            strategies_with_rewards, eps, cancelled_mask=cancelled_mask,
+            strategies_with_rewards,
+            eps,
+            cancelled_mask=cancelled_mask,
+            milestones=milestones,
         )
 
         if not task_datums:
-            logger.warning("No datums to train on this round (all groups degenerate)")
-            metrics.update({"num_substeps": 0, "mini_batch_size": self.config.mini_batch_size,
-                            "substep_datum_counts": []})
+            logger.warning(
+                "No datums to train on this round "
+                "(all groups degenerate or uniform-milestone skipped)"
+            )
+            metrics.update({
+                "num_substeps": 0,
+                "mini_batch_size": self.config.mini_batch_size,
+                "substep_datum_counts": [],
+                "substep_metrics": [],
+                "mean_fb_metrics": {},
+                "grpo_skipped": True,
+                "skip_reason": "no_trainable_datums",
+            })
+            return metrics
+
+        if self.config.skip_grpo_update or self.config.learning_rate <= 0.0:
+            reason = "skip_grpo_update" if self.config.skip_grpo_update else "learning_rate<=0"
+            logger.info(
+                f"GRPO update skipped ({reason}): built {metrics['used']} datums "
+                f"from {len(task_datums)} trainable groups"
+            )
+            metrics.update({
+                "num_substeps": 0,
+                "mini_batch_size": self.config.mini_batch_size,
+                "substep_datum_counts": [],
+                "substep_metrics": [],
+                "mean_fb_metrics": {},
+                "grpo_skipped": True,
+                "skip_reason": reason,
+            })
             return metrics
 
         # 2. Shuffle task_ids deterministically per-round, split into substeps
@@ -683,6 +741,7 @@ class Planner:
         logger.info(
             f"GRPO update: used={metrics['used']}, "
             f"degenerate={metrics['degenerate']}/{metrics['total_groups']}, "
+            f"uniform_milestone_skipped={metrics.get('uniform_milestone_skipped', 0)}, "
             f"substeps={actual_substeps}, mean_reward={metrics['mean_reward']:.3f}"
             f"{loss_str}{extra_str}"
         )

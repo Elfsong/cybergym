@@ -103,6 +103,9 @@ class Config:
                                      # Substeps per round are derived: S = ceil(batch_size / mini_batch_size).
     grad_accum: int = 4
     learning_rate: float = 1e-5           # peak LR (also the constant LR when lr_schedule="constant")
+    skip_grpo_update: bool = False        # Execute and score rollouts, but skip
+                                          # forward_backward/optim_step. Useful
+                                          # for no-op controls.
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
     adam_weight_decay: float = 0.01        # AdamW weight decay (Tinker default is 0.0)
@@ -137,6 +140,12 @@ class Config:
     # "clipped_std": (r - μ) / max(σ, floor) — compromise
     advantage_normalization: str = "mean_only"
     advantage_std_floor: float = 0.3
+    skip_uniform_milestone_groups: bool = True
+                                     # Ignore task groups whose rollout
+                                     # milestones are all identical. This keeps
+                                     # length tie-breakers from creating policy
+                                     # gradients when there is no task-progress
+                                     # signal.
 
     # --- Reward (milestone 0-7 → reward value) ---
     milestone_rewards: tuple = (0.0, 0.5, 1.5, 2.5, 4.0, 5.5, 8.0, 12.0)
@@ -175,6 +184,18 @@ class Config:
     archive_n: int = 3               # top-n strategies in context
     archive_tournament_size: int = 4
     archive_min_milestone: int = 3   # only retrieve strategies that submitted
+
+    # --- Fixed validation eval (disabled by default) ---
+    # Validation pass_rate is checkpoint eval on the same task subset each time.
+    # It is distinct from a round's training-batch pass_rate, which is measured
+    # before that round's GRPO update and on a fresh sampled batch.
+    validation_tasks_file: Path | None = None
+    validation_batch_size: int = 0       # 0 disables sampled validation unless
+                                         # validation_tasks_file is provided.
+    validation_group_size: int = 0       # 0 => reuse group_size.
+    validation_seed: int = 314159
+    validation_every: int = 1
+    validation_use_archive: bool = False
 
     # =========================================================================
     # Role 3 — Judge  (frozen base model → OpenAI-compatible chat endpoint)

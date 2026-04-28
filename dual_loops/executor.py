@@ -60,9 +60,9 @@ class ExecutionResult:
     subprocess_returncode: int | None
     log_dir: Path
     cancelled: bool = False  # APRIL early-stop preempted this rollout; the
-                             # observation is missing-not-failed, so GRPO
-                             # should drop it from the group rather than
-                             # treat its 0-reward as a true outcome.
+                             # planner keeps it in GRPO group stats as a
+                             # low-reward sample so slow strategies become
+                             # negative evidence instead of disappearing.
 
     @property
     def has_trajectory(self) -> bool:
@@ -614,7 +614,7 @@ def execute_strategies(
         logger.warning(
             f"APRIL: {n_cancelled_total} rollouts cancelled "
             f"({n_cancelled_slots} never-started + {n_cancelled_total - n_cancelled_slots} mid-flight) — "
-            f"will be excluded from GRPO group stats"
+            f"will be kept in GRPO group stats as low-reward samples"
         )
 
     # Tidy up tmp dir (logs are kept; tmp is transient)

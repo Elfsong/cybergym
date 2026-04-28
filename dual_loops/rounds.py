@@ -53,6 +53,122 @@ def score_milestones(
     return scored
 
 
+def _rollout_quality_metrics(
+    rewarded: list[tuple[StrategyToExecute, int]],
+    results: list[ExecutionResult],
+) -> dict:
+    milestones = [milestone for _, milestone in rewarded]
+    n = max(len(milestones), 1)
+    return {
+        "n_strategies": len(rewarded),
+        "n_tasks": len({strategy.task_id for strategy, _ in rewarded}),
+        "pass_rate": sum(1 for milestone in milestones if milestone == 7) / n,
+        "avg_milestone": sum(milestones) / n,
+        "milestone_histogram": {i: milestones.count(i) for i in range(8)},
+        "n_cancelled": sum(1 for result in results if result.cancelled),
+        "n_with_trajectory": sum(1 for result in results if result.has_trajectory),
+        "mean_wall_seconds": (
+            sum(result.wall_seconds for result in results) / max(len(results), 1)
+        ),
+    }
+
+
+async def run_validation_round(
+    label: str,
+    planner: Planner,
+    archive: Archive | None,
+    config: Config,
+    task_ids: list[str],
+) -> dict:
+    """Evaluate the current planner on a fixed task set without training."""
+    eval_dir = config.output_dir / "validation" / label
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    t0 = time.monotonic()
+    tasks = build_tasks(task_ids, config)
+
+    old_group_size = config.group_size
+    old_archive_enabled = config.archive_enabled
+    old_archive = planner.archive
+    eval_group_size = config.validation_group_size or config.group_size
+    try:
+        config.group_size = eval_group_size
+        if not config.validation_use_archive:
+            config.archive_enabled = False
+            planner.bind_archive(None)
+
+        strategies_pkl = eval_dir / "strategies.pkl"
+        if strategies_pkl.exists():
+            with open(strategies_pkl, "rb") as f:
+                strategies = pickle.load(f)
+            gen_seconds = 0
+            logger.info(
+                f"Validation {label}: loaded {len(strategies)} strategies "
+                f"from {strategies_pkl.name}"
+            )
+        else:
+            t_gen = time.monotonic()
+            strategies = await planner.generate_strategies(tasks)
+            gen_seconds = int(time.monotonic() - t_gen)
+            with open(strategies_pkl, "wb") as f:
+                pickle.dump(strategies, f)
+            save_json(
+                [
+                    {
+                        "task_id": strategy.task_id,
+                        "group_id": strategy.group_id,
+                        "strategy": strategy.strategy,
+                        "thinking": strategy.thinking,
+                        "n_tokens": len(strategy.tokens),
+                    }
+                    for strategy in strategies
+                ],
+                eval_dir / "strategies.json",
+            )
+    finally:
+        config.group_size = old_group_size
+        config.archive_enabled = old_archive_enabled
+        planner.bind_archive(old_archive)
+
+    t_exec = time.monotonic()
+    results = execute_strategies(strategies, config, eval_dir)
+    exec_seconds = int(time.monotonic() - t_exec)
+    scored = score_milestones(results, config)
+
+    save_jsonl(
+        [
+            {
+                "task_id": strategy.task_id,
+                "group_id": strategy.group_id,
+                "milestone": milestone,
+                "cancelled": results[i].cancelled,
+                "trajectory_path": str(results[i].trajectory_path)
+                if results[i].trajectory_path
+                else None,
+                "strategy": strategy.strategy,
+            }
+            for i, (strategy, milestone) in enumerate(scored)
+        ],
+        eval_dir / "rewards.jsonl",
+    )
+    metrics = _rollout_quality_metrics(scored, results)
+    metrics.update({
+        "label": label,
+        "task_ids": task_ids,
+        "group_size": eval_group_size,
+        "archive_enabled": old_archive_enabled and config.validation_use_archive,
+        "gen_seconds": gen_seconds,
+        "exec_seconds": exec_seconds,
+        "wall_seconds": int(time.monotonic() - t0),
+    })
+    save_json(metrics, eval_dir / "metrics.json")
+    logger.info(
+        f"Validation {label}: pass_rate={metrics['pass_rate']:.3f} "
+        f"avg_milestone={metrics['avg_milestone']:.2f} "
+        f"cancelled={metrics['n_cancelled']}/{metrics['n_strategies']}"
+    )
+    return metrics
+
+
 async def run_round(
     round_idx: int,
     planner: Planner,
@@ -229,6 +345,7 @@ async def run_round(
         [(strategy, reward) for strategy, reward, _ in rewarded],
         round_idx=round_idx,
         cancelled_mask=cancelled_mask,
+        milestones=[milestone for _, _, milestone in rewarded],
     )
 
     if archive is not None and config.archive_enabled:
@@ -280,7 +397,9 @@ async def run_round(
             "n_strategies": len(rewarded),
             "n_tasks": len(tasks),
             "pass_rate": pass_rate,
+            "train_batch_pass_rate_pre_update": pass_rate,
             "avg_milestone": avg_milestone,
+            "train_batch_avg_milestone_pre_update": avg_milestone,
             "milestone_histogram": {i: milestones.count(i) for i in range(8)},
             "reflection_mode": reflection_mode,
             "mean_adherence": mean_judge_adherence,
@@ -312,4 +431,4 @@ async def run_round(
     return metrics
 
 
-__all__ = ["build_tasks", "run_round", "score_milestones"]
+__all__ = ["build_tasks", "run_round", "run_validation_round", "score_milestones"]
