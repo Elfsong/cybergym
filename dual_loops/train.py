@@ -133,7 +133,8 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
         save_json(validation_task_ids, config.output_dir / "validation_task_ids.json")
         logger.info(
             f"Fixed validation: {len(validation_task_ids)} tasks, "
-            f"K={config.validation_group_size or config.group_size}, "
+            f"samples_per_task="
+            f"{config.validation_samples_per_task or config.validation_group_size or config.group_size}, "
             f"every={config.validation_every}, "
             f"archive={'ON' if config.validation_use_archive else 'OFF'}"
         )
@@ -329,7 +330,18 @@ def main() -> None:
     parser.add_argument("--strategy-top-p", type=float, default=None)
     parser.add_argument("--validation-tasks-file", type=Path, default=None)
     parser.add_argument("--validation-batch-size", type=int, default=None)
-    parser.add_argument("--validation-group-size", type=int, default=None)
+    parser.add_argument(
+        "--validation-samples-per-task",
+        type=int,
+        default=None,
+        help="Number of sampled rollouts per validation task.",
+    )
+    parser.add_argument(
+        "--validation-group-size",
+        type=int,
+        default=None,
+        help="Deprecated alias for --validation-samples-per-task.",
+    )
     parser.add_argument("--validation-seed", type=int, default=None)
     parser.add_argument("--validation-every", type=int, default=None)
     parser.add_argument(
@@ -416,7 +428,14 @@ def main() -> None:
         config.validation_tasks_file = args.validation_tasks_file
     if args.validation_batch_size is not None:
         config.validation_batch_size = args.validation_batch_size
+    if args.validation_samples_per_task is not None:
+        config.validation_samples_per_task = args.validation_samples_per_task
     if args.validation_group_size is not None:
+        if args.validation_samples_per_task is not None:
+            raise ValueError(
+                "Use only one of --validation-samples-per-task or "
+                "--validation-group-size."
+            )
         config.validation_group_size = args.validation_group_size
     if args.validation_seed is not None:
         config.validation_seed = args.validation_seed

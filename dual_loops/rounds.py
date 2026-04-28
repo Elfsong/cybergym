@@ -59,10 +59,25 @@ def _rollout_quality_metrics(
 ) -> dict:
     milestones = [milestone for _, milestone in rewarded]
     n = max(len(milestones), 1)
+    task_ids = sorted({strategy.task_id for strategy, _ in rewarded})
+    task_success = {
+        task_id: any(
+            strategy.task_id == task_id and milestone == 7
+            for strategy, milestone in rewarded
+        )
+        for task_id in task_ids
+    }
+    rollout_pass_rate = sum(1 for milestone in milestones if milestone == 7) / n
     return {
         "n_strategies": len(rewarded),
-        "n_tasks": len({strategy.task_id for strategy, _ in rewarded}),
-        "pass_rate": sum(1 for milestone in milestones if milestone == 7) / n,
+        "n_tasks": len(task_ids),
+        "pass_rate": rollout_pass_rate,
+        "rollout_pass_rate": rollout_pass_rate,
+        "task_pass_at_n": (
+            sum(1 for passed in task_success.values() if passed)
+            / max(len(task_success), 1)
+        ),
+        "task_success": task_success,
         "avg_milestone": sum(milestones) / n,
         "milestone_histogram": {i: milestones.count(i) for i in range(8)},
         "n_cancelled": sum(1 for result in results if result.cancelled),
@@ -89,9 +104,13 @@ async def run_validation_round(
     old_group_size = config.group_size
     old_archive_enabled = config.archive_enabled
     old_archive = planner.archive
-    eval_group_size = config.validation_group_size or config.group_size
+    samples_per_task = (
+        config.validation_samples_per_task
+        or config.validation_group_size
+        or config.group_size
+    )
     try:
-        config.group_size = eval_group_size
+        config.group_size = samples_per_task
         if not config.validation_use_archive:
             config.archive_enabled = False
             planner.bind_archive(None)
@@ -154,7 +173,8 @@ async def run_validation_round(
     metrics.update({
         "label": label,
         "task_ids": task_ids,
-        "group_size": eval_group_size,
+        "samples_per_task": samples_per_task,
+        "group_size": samples_per_task,
         "archive_enabled": old_archive_enabled and config.validation_use_archive,
         "gen_seconds": gen_seconds,
         "exec_seconds": exec_seconds,
@@ -162,7 +182,8 @@ async def run_validation_round(
     })
     save_json(metrics, eval_dir / "metrics.json")
     logger.info(
-        f"Validation {label}: pass_rate={metrics['pass_rate']:.3f} "
+        f"Validation {label}: rollout_pass_rate={metrics['rollout_pass_rate']:.3f} "
+        f"task_pass_at_{samples_per_task}={metrics['task_pass_at_n']:.3f} "
         f"avg_milestone={metrics['avg_milestone']:.2f} "
         f"cancelled={metrics['n_cancelled']}/{metrics['n_strategies']}"
     )

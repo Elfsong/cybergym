@@ -192,7 +192,9 @@ class Config:
     validation_tasks_file: Path | None = None
     validation_batch_size: int = 0       # 0 disables sampled validation unless
                                          # validation_tasks_file is provided.
-    validation_group_size: int = 0       # 0 => reuse group_size.
+    validation_samples_per_task: int = 0 # 0 => reuse group_size.
+    validation_group_size: int = 0       # Back-compat alias for
+                                         # validation_samples_per_task.
     validation_seed: int = 314159
     validation_every: int = 1
     validation_use_archive: bool = False
