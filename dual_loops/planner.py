@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -224,8 +225,14 @@ class Planner:
         assert self.training_client is not None and self.renderer is not None
 
         # Save current weights → get on-policy sampling client
+        t_save = time.monotonic()
+        logger.info("Planner sampling: saving weights and creating sampling client")
         sampling_client = (
             await self.training_client.save_weights_and_get_sampling_client_async()
+        )
+        logger.info(
+            "Planner sampling: sampling client ready in %ss",
+            int(time.monotonic() - t_save),
         )
 
         # One job per (task, group_id) — independent retrieve + independent prompt
@@ -254,8 +261,21 @@ class Planner:
                     sampling_params=self.sampling_params,
                 )
 
+        t_sample = time.monotonic()
+        logger.info(
+            "Planner sampling: dispatching %s Tinker sample requests "
+            "(max_tokens=%s, parallel=%s)",
+            len(jobs),
+            self.config.max_strategy_tokens,
+            max(1, self.config.planner_parallel),
+        )
         sample_results = await asyncio.gather(
             *(_sample_one(prompt) for _, _, prompt, _ in jobs)
+        )
+        logger.info(
+            "Planner sampling: received %s sample responses in %ss",
+            len(sample_results),
+            int(time.monotonic() - t_sample),
         )
 
         strategies: list[StrategyToExecute] = []

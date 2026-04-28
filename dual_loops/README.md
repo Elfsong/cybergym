@@ -1,10 +1,10 @@
 # Policy Loop: Iterative Offline GRPO
 
-Trains a Qwen3.5-27B LoRA planner via GRPO, using MiniMax-M2.5 (self-hosted vLLM) as the frozen executor.
+Trains a Qwen3.5-27B LoRA planner via GRPO, using a frozen OpenHands executor against CyberGym.
 
 ## Setup
 
-1. **vLLM** serving MiniMax on `localhost:8000` (use `start_minimax_2_5_server.sh`)
+1. **vLLM** serving Qwen3.5-27B on `localhost:8001` (use `start_qwen3_5_27b_server.sh`)
 2. **CyberGym server** on `172.17.0.1:8666` (use `start_cybergym_server.sh`)
 3. **Tinker API key**: `export TINKER_API_KEY=...`
 4. **CyberGym API key** (for fix-build verification): `export CYBERGYM_API_KEY=...`
@@ -39,24 +39,71 @@ uv run python -m dual_loops.tools.dry_run --task-ids arvo:8933 arvo:13704
 uv run python -m dual_loops.tools.validate_milestone
 ```
 
-### Full training
+### Recommended GRPO training
 ```bash
-uv run python -m dual_loops.train --num-rounds 6 --batch-size 48 --mini-batch-size 8
+uv run python -m dual_loops.train \
+  --num-rounds 12 \
+  --batch-size 32 \
+  --mini-batch-size 8 \
+  --validation-batch-size 32 \
+  --validation-samples-per-task 8
 ```
+
+Current defaults match the stable post-noise-floor configuration: archive off,
+judge reward off, `learning_rate=5e-6`, `advantage_normalization=clipped_std`,
+`reward_compression=log1p`, `max_strategy_tokens=2048`, and APRIL-cancelled
+rollouts kept in GRPO group statistics as low-reward samples.
+
+Training-batch `pass_rate` is measured on that round's sampled tasks before the
+GRPO update. Use fixed validation for the headline checkpoint curve; it evaluates
+each checkpoint on the same task IDs and removes the task-sample noise measured
+in `experiment_report.md`.
+
+### Paired training-batch comparison
+```bash
+uv run python -m dual_loops.train \
+  --num-rounds 4 \
+  --batch-size 32 \
+  --mini-batch-size 8 \
+  --fixed-train-batch
+```
+
+`--fixed-train-batch` reuses one sampled task subset for every training round.
+Use it for short paired ablations; for ordinary training, leave it off so rounds
+cover more of `TASKS_TRAIN`.
+
+### Minimal real-training smoke test
+```bash
+uv run python -m dual_loops.train \
+  --num-rounds 1 \
+  --batch-size 1 \
+  --group-size 2 \
+  --mini-batch-size 1 \
+  --planner-parallel 2 \
+  --executor-parallel 2 \
+  --max-strategy-tokens 512 \
+  --train-root /tmp/cybergym-grpo-debug \
+  --no-archive \
+  --lambda-adherence 0
+```
+
+Use this for end-to-end Tinker + OpenHands + CyberGym debugging. Production
+training should use the default planner token cap unless sampling latency needs
+temporary reduction.
 
 ### Full training with the experience archive enabled
 ```bash
-uv run python -m dual_loops.train --num-rounds 6 --batch-size 48 --mini-batch-size 8 --archive
+uv run python -m dual_loops.train --num-rounds 12 --batch-size 32 --mini-batch-size 8 --archive
 ```
 
 ### Milestone-only reward, but still collect judge outputs into the archive
 ```bash
-uv run python -m dual_loops.train --num-rounds 6 --batch-size 48 --mini-batch-size 8 --archive --judge-archive-only
+uv run python -m dual_loops.train --num-rounds 12 --batch-size 32 --mini-batch-size 8 --archive --judge-archive-only
 ```
 
 ### Ablation: turn off the archive
 ```bash
-uv run python -m dual_loops.train --num-rounds 6 --batch-size 48 --mini-batch-size 8 --no-archive
+uv run python -m dual_loops.train --num-rounds 12 --batch-size 32 --mini-batch-size 8 --no-archive
 ```
 
 ## Milestones (paper Table 2)
@@ -78,17 +125,20 @@ Without it, the detector caps at milestone 6.
 ## Output Structure
 
 ```
-dual_loops_runs/{run_id}/
+<train_root>/<run_id>/
 ├── config.json                    # snapshot of config at run start
 ├── train.log                      # all log output
 ├── all_metrics.json               # per-round metrics summary
+├── validation_task_ids.json       # present when fixed validation is enabled
+├── validation_metrics.json        # present when fixed validation is enabled
+├── train_task_ids.json            # present when --fixed-train-batch is enabled
 ├── archive.jsonl                  # accumulating (strategy, milestone, adherence, insight, …)
 ├── checkpoints/
 │   ├── round_000/
-│   │   ├── lora_weights           # Tinker checkpoint
-│   │   └── metrics.json
+│   │   └── metrics.json           # includes Tinker checkpoint reference
 │   └── ...
 └── round_000/
+    ├── task_ids.json              # exact training task IDs for this round
     ├── strategies.json            # all K*N generated strategies (text + metadata)
     ├── rewards.jsonl              # per-strategy reward + milestone + judge metadata
     ├── metrics.json               # round-level aggregated metrics

@@ -116,7 +116,8 @@ async def run_validation_round(
             planner.bind_archive(None)
 
         strategies_pkl = eval_dir / "strategies.pkl"
-        if strategies_pkl.exists():
+        loaded_strategies = strategies_pkl.exists()
+        if loaded_strategies:
             with open(strategies_pkl, "rb") as f:
                 strategies = pickle.load(f)
             gen_seconds = 0
@@ -143,6 +144,18 @@ async def run_validation_round(
                 ],
                 eval_dir / "strategies.json",
             )
+        strategy_task_ids = {strategy.task_id for strategy in strategies}
+        if strategy_task_ids != set(task_ids):
+            message = (
+                "Validation strategy task IDs do not match selected validation "
+                "task IDs."
+            )
+            if loaded_strategies:
+                raise RuntimeError(
+                    f"{message} Remove the stale validation strategies.pkl or "
+                    "resume with the original validation configuration."
+                )
+            logger.warning(message)
     finally:
         config.group_size = old_group_size
         config.archive_enabled = old_archive_enabled
@@ -197,6 +210,7 @@ async def run_round(
     config: Config,
     all_task_ids: list[str],
     rng: random.Random,
+    batch_ids: list[str] | None = None,
 ) -> dict:
     """Run one full GRPO round."""
     round_dir = config.output_dir / f"round_{round_idx:03d}"
@@ -205,17 +219,25 @@ async def run_round(
 
     logger.info(f"=== ROUND {round_idx + 1}/{config.num_rounds} ===")
 
-    if config.batch_size >= len(all_task_ids):
+    if batch_ids is not None:
+        batch_ids = list(batch_ids)
+        logger.info(
+            f"Using fixed paired train batch ({len(batch_ids)} tasks) "
+            f"for round {round_idx}"
+        )
+    elif config.batch_size >= len(all_task_ids):
         batch_ids = list(all_task_ids)
         rng.shuffle(batch_ids)
         logger.info(f"Using full task pool ({len(batch_ids)} tasks) for round {round_idx}")
     else:
         batch_ids = rng.sample(all_task_ids, config.batch_size)
         logger.info(f"Sampled {len(batch_ids)} tasks for round {round_idx}")
+    save_json(batch_ids, round_dir / "task_ids.json")
     tasks = build_tasks(batch_ids, config)
 
     strategies_pkl = round_dir / "strategies.pkl"
-    if strategies_pkl.exists():
+    loaded_strategies = strategies_pkl.exists()
+    if loaded_strategies:
         with open(strategies_pkl, "rb") as f:
             strategies = pickle.load(f)
         gen_seconds = 0
@@ -240,6 +262,16 @@ async def run_round(
             round_dir / "strategies.json",
         )
         logger.info(f"Generation: {len(strategies)} strategies in {gen_seconds}s")
+
+    strategy_task_ids = {strategy.task_id for strategy in strategies}
+    if strategy_task_ids != set(batch_ids):
+        message = "Strategy task IDs do not match selected round task IDs."
+        if loaded_strategies:
+            raise RuntimeError(
+                f"{message} This usually means the run was resumed with different "
+                "task-sampling flags or a stale strategies.pkl is present."
+            )
+        logger.warning(message)
 
     t_exec = time.monotonic()
     results = execute_strategies(strategies, config, round_dir)
@@ -394,6 +426,10 @@ async def run_round(
         )
 
     milestones = [milestone for _, _, milestone in rewarded]
+    quality_metrics = _rollout_quality_metrics(
+        [(strategy, milestone) for strategy, _, milestone in rewarded],
+        results,
+    )
     pass_rate = sum(1 for milestone in milestones if milestone == 7) / max(len(milestones), 1)
     avg_milestone = sum(milestones) / max(len(milestones), 1)
     n_samples_with_priors = sum(1 for strategy, _, _ in rewarded if strategy.priors_shown)
@@ -412,13 +448,17 @@ async def run_round(
     archive_size = archive.size() if archive is not None else 0
     think_lens = [strategy.n_thinking_tokens for strategy, _, _ in rewarded]
     strat_lens = [strategy.n_strategy_tokens for strategy, _, _ in rewarded]
+    metrics.update(quality_metrics)
     metrics.update(
         {
             "round": round_idx,
             "n_strategies": len(rewarded),
             "n_tasks": len(tasks),
+            "task_ids": batch_ids,
+            "task_sampling_mode": "fixed" if config.fixed_train_batch else "random",
             "pass_rate": pass_rate,
             "train_batch_pass_rate_pre_update": pass_rate,
+            "train_batch_task_pass_at_n_pre_update": quality_metrics["task_pass_at_n"],
             "avg_milestone": avg_milestone,
             "train_batch_avg_milestone_pre_update": avg_milestone,
             "milestone_histogram": {i: milestones.count(i) for i in range(8)},

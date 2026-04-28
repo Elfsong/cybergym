@@ -69,7 +69,52 @@ def _load_existing_validation_metrics(run_dir: Path) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+def _load_json_task_ids(path: Path) -> list[str]:
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        logger.warning(f"Could not load task IDs from {path}")
+        return []
+    return [str(task_id) for task_id in data] if isinstance(data, list) else []
+
+
+def _select_task_batch(
+    all_task_ids: list[str],
+    batch_size: int,
+    rng: random.Random,
+) -> list[str]:
+    if batch_size >= len(all_task_ids):
+        task_ids = list(all_task_ids)
+        rng.shuffle(task_ids)
+        return task_ids
+    return rng.sample(all_task_ids, batch_size)
+
+
+def _load_or_select_fixed_train_task_ids(
+    config: Config,
+    all_task_ids: list[str],
+) -> list[str]:
+    path = config.output_dir / "train_task_ids.json"
+    if path.exists():
+        task_ids = _load_json_task_ids(path)
+        if task_ids:
+            return task_ids
+    task_ids = _select_task_batch(
+        all_task_ids,
+        config.batch_size,
+        random.Random(config.seed),
+    )
+    save_json(task_ids, path)
+    return task_ids
+
+
 def _select_validation_task_ids(config: Config, all_task_ids: list[str]) -> list[str]:
+    existing_path = config.output_dir / "validation_task_ids.json"
+    if existing_path.exists():
+        task_ids = _load_json_task_ids(existing_path)
+        if task_ids:
+            return task_ids
     if config.validation_tasks_file is not None:
         task_ids = parse_tasks_file(config.validation_tasks_file)
         if config.validation_batch_size > 0:
@@ -105,7 +150,8 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
         f"lr={config.learning_rate}, adv_norm={config.advantage_normalization}, "
         f"reward_compression={config.reward_compression}, "
         f"skip_update={config.skip_grpo_update}, "
-        f"skip_uniform_milestone_groups={config.skip_uniform_milestone_groups}"
+        f"skip_uniform_milestone_groups={config.skip_uniform_milestone_groups}, "
+        f"fixed_train_batch={config.fixed_train_batch}"
     )
     logger.info(
         f"Archive: {'ON' if config.archive_enabled else 'OFF'} | "
@@ -128,6 +174,17 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
     if not all_task_ids:
         raise RuntimeError(f"No tasks in {config.tasks_file}")
     logger.info(f"Task pool: {len(all_task_ids)} tasks")
+    if not config.fixed_train_batch and (config.output_dir / "train_task_ids.json").exists():
+        config.fixed_train_batch = True
+        logger.info("Detected existing train_task_ids.json; continuing fixed-train-batch mode")
+        save_json(asdict(config), config.output_dir / cfg_name)
+    fixed_train_task_ids: list[str] | None = None
+    if config.fixed_train_batch:
+        fixed_train_task_ids = _load_or_select_fixed_train_task_ids(config, all_task_ids)
+        logger.info(
+            f"Fixed train batch: reusing {len(fixed_train_task_ids)} task IDs "
+            "for every round"
+        )
     validation_task_ids = _select_validation_task_ids(config, all_task_ids)
     if validation_task_ids:
         save_json(validation_task_ids, config.output_dir / "validation_task_ids.json")
@@ -166,12 +223,9 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
 
     rng = random.Random(config.seed)
     logger.info(f"RNG seed: {config.seed}")
-    for _ in range(start_round):
-        if config.batch_size >= len(all_task_ids):
-            batch_ids = list(all_task_ids)
-            rng.shuffle(batch_ids)
-        else:
-            rng.sample(all_task_ids, config.batch_size)
+    if not config.fixed_train_batch:
+        for _ in range(start_round):
+            _select_task_batch(all_task_ids, config.batch_size, rng)
 
     round_metrics = _load_existing_round_metrics(config.output_dir, start_round)
     validation_metrics = _load_existing_validation_metrics(config.output_dir)
@@ -183,7 +237,15 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
         save_json(validation_metrics, config.output_dir / "validation_metrics.json")
 
     for round_idx in range(start_round, config.num_rounds):
-        metrics = await run_round(round_idx, planner, archive, config, all_task_ids, rng)
+        metrics = await run_round(
+            round_idx,
+            planner,
+            archive,
+            config,
+            all_task_ids,
+            rng,
+            batch_ids=fixed_train_task_ids,
+        )
         if (
             validation_task_ids
             and config.validation_every > 0
@@ -205,9 +267,15 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
     save_json(round_metrics, config.output_dir / "all_metrics.json")
     logger.info("=== Training complete ===")
     for metrics in round_metrics:
+        eval_metrics = metrics.get("fixed_eval") or {}
+        fixed_eval = (
+            f" fixed_eval_task_pass_at_n={eval_metrics['task_pass_at_n']:.3f}"
+            if "task_pass_at_n" in eval_metrics
+            else ""
+        )
         logger.info(
             f"Round {metrics['round']}: pass_rate={metrics['pass_rate']:.3f} "
-            f"avg_milestone={metrics['avg_milestone']:.2f}"
+            f"avg_milestone={metrics['avg_milestone']:.2f}{fixed_eval}"
         )
 
 
@@ -236,6 +304,11 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--group-size", type=int, default=None)
     parser.add_argument("--tasks-file", type=Path, default=None)
+    parser.add_argument(
+        "--fixed-train-batch",
+        action="store_true",
+        help="Reuse one sampled task batch for every training round; useful for paired comparisons.",
+    )
     parser.add_argument(
         "--archive",
         dest="archive_enabled",
@@ -276,6 +349,12 @@ def main() -> None:
     )
     parser.add_argument("--thinking-ref-tokens", type=int, default=None)
     parser.add_argument("--strategy-ref-tokens", type=int, default=None)
+    parser.add_argument(
+        "--max-strategy-tokens",
+        type=int,
+        default=None,
+        help="Override planner generation token cap. Use smaller values such as 512 for smoke tests.",
+    )
     parser.add_argument("--insight-max-tokens", type=int, default=None)
     parser.add_argument("--learning-rate", type=float, default=None)
     parser.add_argument(
@@ -370,6 +449,8 @@ def main() -> None:
         config.strategy_top_p = args.strategy_top_p
     if args.tasks_file is not None:
         config.tasks_file = args.tasks_file
+    if args.fixed_train_batch:
+        config.fixed_train_batch = True
     if args.planner_parallel is not None:
         config.planner_parallel = args.planner_parallel
     if args.judge_parallel is not None:
@@ -422,6 +503,8 @@ def main() -> None:
         config.thinking_ref_tokens = args.thinking_ref_tokens
     if args.strategy_ref_tokens is not None:
         config.strategy_ref_tokens = args.strategy_ref_tokens
+    if args.max_strategy_tokens is not None:
+        config.max_strategy_tokens = args.max_strategy_tokens
     if args.insight_max_tokens is not None:
         config.insight_max_tokens = args.insight_max_tokens
     if args.validation_tasks_file is not None:

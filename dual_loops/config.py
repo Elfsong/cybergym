@@ -102,7 +102,7 @@ class Config:
     mini_batch_size: int = 8         # task groups per GRPO mini-batch.
                                      # Substeps per round are derived: S = ceil(batch_size / mini_batch_size).
     grad_accum: int = 4
-    learning_rate: float = 1e-5           # peak LR (also the constant LR when lr_schedule="constant")
+    learning_rate: float = 5e-6           # peak LR; c4f76f38 stabilized PPO loss vs 1e-5.
     skip_grpo_update: bool = False        # Execute and score rollouts, but skip
                                           # forward_backward/optim_step. Useful
                                           # for no-op controls.
@@ -115,16 +115,19 @@ class Config:
     lr_warmup_ratio: float = 0.10          # linear warmup over first lr_warmup_ratio * total_steps steps
     kl_beta: float = 0.01                  # reserved (not currently wired into Tinker loss)
     num_rounds: int = 12
-    max_strategy_tokens: int = 4096     # observed p95 ≈ 600 tokens (clean strategies);
-                                        # cap prevents runaway "safety-refusal loop"
-                                        # outputs (~0.05% rollouts previously hit 14K tokens)
+    max_strategy_tokens: int = 2048     # observed p95 ≈ 600 tokens (clean strategies);
+                                        # tighter cap limits runaway "safety-refusal loop"
+                                        # outputs and keeps Tinker sampling bounded.
     strategy_temperature: float = 1.0   # higher temp gives intra-group strategy diversity
     strategy_top_p: float = 0.95
 
-    # Master seed for reproducibility. Per-round RNG is derived as seed+round_idx
-    # so resuming round R uses the same task sample / archive draw as the original
-    # run. None disables seeding (legacy nondeterministic behavior).
+    # Master seed for reproducibility. Default training uses one RNG advanced
+    # across rounds, so resuming round R reuses the original task samples.
+    # `fixed_train_batch=True` reuses one task subset across all rounds for
+    # paired comparisons that remove task-sample noise from train-batch metrics.
+    # None disables seeding (legacy nondeterministic behavior).
     seed: int = 42
+    fixed_train_batch: bool = False
 
     # --- Loss function (PPO-clip via Tinker) ---
     # Tinker supports {"importance_sampling", "ppo", "cispo", "dro"}.
@@ -138,21 +141,22 @@ class Config:
     # "mean_std":    (r - μ) / (σ + eps)  — classic, noisy in small groups
     # "mean_only":   r - μ                 — Dr.GRPO; removes σ-driven variance
     # "clipped_std": (r - μ) / max(σ, floor) — compromise
-    advantage_normalization: str = "mean_only"
+    advantage_normalization: str = "clipped_std"
     advantage_std_floor: float = 0.3
-    skip_uniform_milestone_groups: bool = True
+    skip_uniform_milestone_groups: bool = False
                                      # Ignore task groups whose rollout
                                      # milestones are all identical. This keeps
                                      # length tie-breakers from creating policy
                                      # gradients when there is no task-progress
-                                     # signal.
+                                     # signal. Default stays OFF to match the
+                                     # full-datum c4f76f38 stabilizer run.
 
     # --- Reward (milestone 0-7 → reward value) ---
     milestone_rewards: tuple = (0.0, 0.5, 1.5, 2.5, 4.0, 5.5, 8.0, 12.0)
     # Compression applied to r_milestone BEFORE the adherence multiplier.
     # "none" | "log1p" (→ 0..2.56) | "sqrt" (→ 0..3.46). Reduces milestone=7
     # outlier dominance of intra-group advantages.
-    reward_compression: str = "none"
+    reward_compression: str = "log1p"
     lambda_adherence: float = 0.0    # adherence-bonus weight in the composite reward.
                                      # With the current milestone-only default (0.0),
                                      # the judge affects reward only if explicitly

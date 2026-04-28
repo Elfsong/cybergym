@@ -11,6 +11,7 @@ import glob
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -48,6 +49,9 @@ _STOP_EVENT = threading.Event()
 # config.executor_docker_stagger_seconds across the entire pool.
 _DOCKER_LAUNCH_LOCK = threading.Lock()
 _LAST_DOCKER_LAUNCH_TS = 0.0
+_OPENHANDS_RUNTIME_RE = re.compile(
+    r"runtime ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]{16})"
+)
 
 
 @dataclass
@@ -110,19 +114,47 @@ def _recover_trajectory(task_norm: str, agent_id: str, log_dir: Path) -> None:
             json.dump(trajectory, f)
 
 
-def _cleanup_docker_containers(prefix: str = "openhands-runtime-") -> int:
-    """Force-remove any Docker containers matching prefix. Returns count removed."""
+def _find_openhands_runtime_containers(log_dir: Path) -> set[str]:
+    """Return OpenHands runtime container names referenced by this run's logs."""
+    names: set[str] = set()
+    if not log_dir.exists():
+        return names
+    for path in log_dir.rglob("*.log"):
+        if not path.is_file():
+            continue
+        try:
+            with open(path, errors="ignore") as f:
+                for line in f:
+                    match = _OPENHANDS_RUNTIME_RE.search(line)
+                    if match:
+                        names.add(f"openhands-runtime-{match.group(1)}")
+        except OSError:
+            continue
+    return names
+
+
+def _cleanup_docker_containers(log_dir: Path | None = None) -> int:
+    """Force-remove only OpenHands containers referenced by this run's logs."""
+    if log_dir is None:
+        logger.debug("Skipping Docker cleanup without run log_dir; refusing global prefix sweep")
+        return 0
+    container_names = _find_openhands_runtime_containers(log_dir)
+    if not container_names:
+        return 0
     try:
         import docker
         client = docker.from_env()
         removed = 0
-        for c in client.containers.list(all=True):
-            if c.name.startswith(prefix):
-                try:
-                    c.remove(force=True)
-                    removed += 1
-                except Exception:
-                    pass
+        for name in sorted(container_names):
+            try:
+                container = client.containers.get(name)
+            except docker.errors.NotFound:
+                continue
+            try:
+                container.remove(force=True)
+                removed += 1
+            except Exception:
+                pass
         return removed
     except Exception:
         return 0
@@ -481,7 +513,7 @@ def execute_strategies(
     _STOP_EVENT.clear()  # fresh round
 
     def _trigger_stop(reason: str) -> None:
-        """Atomic: flip stop event, fan out SIGTERM, sweep orphan containers.
+        """Atomic: flip stop event, fan out SIGTERM, clean this run's containers.
         Idempotent — safe to call from both the as_completed loop and the
         watchdog thread without racing.
         """
@@ -502,11 +534,13 @@ def execute_strategies(
                 os.killpg(os.getpgid(p.pid), 15)
             except (ProcessLookupError, PermissionError):
                 pass
-        # Docker container sweep so orphans don't accumulate across rounds.
+        # Docker cleanup is scoped to containers whose runtime IDs appear in
+        # this round's logs. A prefix-wide sweep can kill unrelated OpenHands
+        # jobs on a shared host.
         try:
-            n_orphans = _cleanup_docker_containers()
+            n_orphans = _cleanup_docker_containers(log_dir)
             if n_orphans:
-                logger.warning(f"APRIL stop: removed {n_orphans} orphaned Docker containers")
+                logger.warning(f"APRIL stop: removed {n_orphans} Docker containers from this run")
         except Exception as e:
             logger.warning(f"APRIL stop: docker cleanup failed: {e}")
 
@@ -620,10 +654,10 @@ def execute_strategies(
     # Tidy up tmp dir (logs are kept; tmp is transient)
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    # Force-remove any orphaned OpenHands Docker containers
-    n_orphans = _cleanup_docker_containers()
+    # Force-remove only orphaned OpenHands containers referenced by this run's logs.
+    n_orphans = _cleanup_docker_containers(log_dir)
     if n_orphans > 0:
-        logger.warning(f"Cleaned up {n_orphans} orphaned Docker containers")
+        logger.warning(f"Cleaned up {n_orphans} OpenHands Docker containers from this run")
 
     # Log disk usage for monitoring
     try:
