@@ -1,11 +1,15 @@
 # GRPO Training Experiment Report — Mastermind Planner LoRA
 
-Run dates: 2026-04-27.
+Run dates: 2026-04-27 → 2026-04-28.
 Setup: Tinker SDK + Qwen3.5-27B + LoRA rank=32 (planner) + OpenHands + vLLM TP=8 (executor) on local 8×A100 + CyberGym verify-agent-pocs (scoring).
 
 ## TL;DR
 
-Across **5 consecutive 12-round GRPO training runs** with progressively more aggressive scaffolding fixes, **`pass_rate` (fraction of rollouts hitting milestone-7 verified PoC) dropped monotonically from R1 baseline through R3-R4 in every run**. The base (un-tuned) policy was the best policy at every checkpoint. Codex (gpt-5.4) diagnosed this as **survivor-biased GRPO**: `planner.py:_build_task_datums` was filtering APRIL-cancelled rollouts before computing per-task mean/std, so any strategy that led to slow (cancelled) executor behavior contributed zero gradient. Slow-strategy bias compounded each round. **Fix landed in commit `43c3c53`**: cancelled rollouts now stay in-group with their (low, near-zero) reward, so slow-strategy gets pushed to negative advantage. Run `1586c566` (started 2026-04-27 02:41 UTC+8) is the first run with the fix.
+Across **6 consecutive GRPO training runs** with progressively more aggressive scaffolding fixes — survivor-bias filter removed, advantage clipped_std, reward log1p compression, lr halved to 5e-6, judge skipped, archive off — **`pass_rate` (fraction of rollouts hitting milestone-7 verified PoC) dropped monotonically from R1 baseline through R3-R4 in every run**. The base (un-tuned) policy was the best policy at every checkpoint.
+
+Codex (gpt-5.4) correctly diagnosed the **survivor-bias** mechanism on the first three runs: `planner.py:_build_task_datums` was filtering APRIL-cancelled rollouts before per-group mean/std, so slow strategies contributed zero gradient and got reinforced by omission. Commit `43c3c53` fixed that filter; commits `c4f76f38`'s run additionally stacked Codex's tier-2 stabilizers (clipped_std + log1p + lr/2). All four interventions worked **as engineering** — `used` stayed at the full batch×K=256, `degenerate=0/32`, `loss` stayed below 0.13, the misleading "mean_reward up while pass_rate down" signature is gone — but **pass_rate still degraded each round** (0.145 → 0.133 → 0.113 → 0.031 over R1-R4 of run `c4f76f38`).
+
+Working hypothesis after the c4f76f38 run: **the base Qwen3.5-27B is at or near the local optimum for this task family at level1 difficulty under the available rollout budget**. GRPO updates with any LR > 0 trade off measurable signal (intermediate milestones m=1-3) for catastrophic loss on the rare m=7 successes. The next experiment to disambiguate is a `lr=1e-7` run: if pass_rate also degrades, the issue is task-sample noise, not GRPO; if pass_rate holds at 0.14, GRPO updates themselves are the root cause.
 
 ## Setup Common to All Runs
 
@@ -34,13 +38,14 @@ f_strat     = max(0, 1 − n_strat_tokens / 500)      rewards SHORT strategy (si
 
 ## Run History
 
-| run_id | start (UTC+8) | parallel | batch | adherence λ | archive | γ_strat | reward fix? | rounds done | terminal pass_rate | notes |
-|---|---|---|---|---|---|---|---|---|---|---|
-| `90b2ebc4` | 13:11 | 32 | 48 | 0.5 | on | 0 | – | 1 | 0.06 | killed: pre-launch APRIL UnboundLocalError + 82% CRASH |
-| `2b7eb258` | 13:19 | 32 | 48 | 0.5 | on | 0 | – | 2 | 0.042 | killed: R1=0.06, R2=0.042 — clear regression |
-| `3b22894a` | 17:17 | 64 | 32 | 0.5 | on | 0 | – | 3 | 0.109 | killed: bigger throughput, but R1=0.141→R3=0.109 still monotonic ↓ |
-| `e4a0ce10` | 21:13 | 64 | 32 | 0.0 (skip) | OFF | 0.1 | – | 4 | 0.082 | killed: ablation (no judge, no archive) — ↓ continued |
-| `1586c566` | 02:41 (next day) | 64 | 32 | 0.0 (skip) | OFF | 0.1 | **YES** (43c3c53) | running | – | first run with survivor-bias fix |
+| run_id | start (UTC+8) | parallel | batch | adherence λ | archive | γ_strat | survivor fix | clipped_std | log1p | lr | rounds done | terminal pass_rate | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `90b2ebc4` | 27 13:11 | 32 | 48 | 0.5 | on | 0 | no | no | no | 1e-5 | 1 | 0.06 | killed: pre-launch APRIL UnboundLocalError + 82% CRASH |
+| `2b7eb258` | 27 13:19 | 32 | 48 | 0.5 | on | 0 | no | no | no | 1e-5 | 2 | 0.042 | killed: R1=0.06, R2=0.042 — clear regression |
+| `3b22894a` | 27 17:17 | 64 | 32 | 0.5 | on | 0 | no | no | no | 1e-5 | 3 | 0.109 | killed: more throughput, R1=0.141→R3=0.109 still ↓ |
+| `e4a0ce10` | 27 21:13 | 64 | 32 | 0.0 (skip) | OFF | 0.1 | no | no | no | 1e-5 | 4 | 0.082 | killed: ablation cleanest pre-fix evidence — ↓ confirmed |
+| `1586c566` | 28 02:41 | 64 | 32 | 0.0 (skip) | OFF | 0.1 | **YES** (43c3c53) | no | no | 1e-5 | 0 | – | killed at 16 min (user wanted to think before restart) |
+| `c4f76f38` | 28 03:51 | 64 | 32 | 0.0 (skip) | OFF | 0.1 | YES | **YES** | **YES** | **5e-6** | **4 (full)** | **0.031** | first complete run with all 4 stabilizers + fix |
 
 ## The Problem — Survivor-Biased GRPO
 
@@ -134,15 +139,107 @@ So a slow-strategy that always APRIL-cancels gets reward ≈ 0..0.1, while a suc
 Side metric renamed in `summary` dict:
 - `n_cancelled_dropped` → `n_cancelled_kept`
 
+## Run `c4f76f38` — All Stabilizers + Survivor Fix Stacked (4-round short run)
+
+CLI used:
+
+```bash
+uv run python -m dual_loops.train \
+    --num-rounds 4 \
+    --batch-size 32 \
+    --mini-batch-size 8 \
+    --group-size 8 \
+    --no-archive \
+    --lambda-adherence 0 \
+    --gamma-strategy 0.1 \
+    --advantage-normalization clipped_std \
+    --advantage-std-floor 0.3 \
+    --reward-compression log1p \
+    --learning-rate 5e-6
+```
+
+This stacks **all four interventions** (survivor-bias fix from commit `43c3c53` + Codex's tier-2: clipped_std, log1p, lr/2) at once. Goal: minimum-distance ablation to test whether the residual decline survives every known fix.
+
+### Per-round metrics
+
+| metric | R1 (baseline) | R2 | R3 | R4 |
+|---|---|---|---|---|
+| `pass_rate` (m=7 / 256) | **0.145** | 0.133 | 0.113 | **0.031** |
+| `avg_milestone` | **2.24** | 1.61 | 1.87 | **1.17** |
+| `mean_reward` (log1p scale) | 0.871 | 0.626 | 0.728 | 0.472 |
+| `loss / per_datum` | 0.1022 | 0.0752 | 0.1217 | 0.0724 |
+| `adv std` | 0.40 | 0.32 | 0.40 | 0.34 |
+| `used` datums | **256** | **256** | **256** | **256** |
+| `degenerate` groups | **0/32** | **0/32** | **0/32** | **0/32** |
+| `substeps` (configured 4) | 4 | 4 | 4 | 4 |
+| `surviving_groups` (≥K_min=5) | 8 | 5 | 7 | 4 |
+| `cancelled` rollouts | 112 | 143 | 134 | 155 |
+
+### What worked
+
+✅ **Survivor-bias fix verified** — `used = 256` every round (vs `e4a0ce10` 147→121→97→104 collapsing). All cancelled rollouts contribute group-relative gradient.
+
+✅ **`mean_reward` and `pass_rate` move together** — R2 both down, R3 both up, R4 both down. The misleading "mean_reward ↑ while pass_rate ↓" signature from the bias-loop runs is gone.
+
+✅ **`degenerate = 0/32` every round** — γ_strategy=0.1 ensures group reward variance even when all milestones are equal (strategy-length term breaks ties).
+
+✅ **`loss` stayed in the linear PPO regime** — peak 0.1217 (R3), vs `e4a0ce10` R3 = 0.7527 and R4 = 0.9164 where PPO clipping was firing constantly.
+
+✅ **`adv std` capped at 0.40** — log1p compression (m=7 reward 12 → 2.56) + clipped_std floor 0.3 successfully tamed the m=7 winner-take-all effect on per-group advantages.
+
+✅ **`substeps = 4` every round** — full configured budget hit (`ceil(32/8) = 4`), LR cosine schedule advances on schedule.
+
+### What didn't work
+
+❌ **`pass_rate` still monotonically declined** — 0.145 → 0.133 → 0.113 → 0.031 (-79% from baseline over 3 GRPO updates).
+
+❌ **R4 collapse: -72% in one round** — 0.113 → 0.031 is the worst single-round drop seen across any run.
+
+❌ **Final policy is worse than `e4a0ce10`'s no-fix terminal** (0.031 vs 0.082). All four stabilizers + survivor-bias fix produced a *worse* terminal pass_rate than the run with none of them.
+
+### Interpretation
+
+The R4 LR was at the cosine schedule floor (5e-6 × 0.1 = 5e-7 by step 14/16), so the R4 update itself was nearly a no-op. The R4 pass_rate collapse is therefore likely **task-sample noise** — round-4 happened to draw a hard subset of the 300-task pool — but the underlying R1→R3 decline is **not** noise: it tracks every prior run's shape.
+
+Three remaining hypotheses for the residual decline:
+
+1. **Base policy is at local optimum for this rollout budget** — Qwen3.5-27B with strategy_temperature=1.0 already finds the best strategies it can; any LoRA update destroys part of the reasoning circuit needed for m=7 without compensating gain.
+2. **Reward signal is too sparse** — even with log1p, only ~20 of 256 rollouts hit m≥6 (where reward differences are large). The other ~236 are at m=0-3 where the reward gradient between adjacent milestones (after log1p compression) is `log1p(2.5) - log1p(1.5) = 1.25 - 0.92 = 0.33`. Group advantages on those 236 are ≤0.4 in magnitude, contribute minimally to the gradient relative to the 20 m≥6 outliers — but those 20 are a noisy signal.
+3. **GRPO with LoRA rank=32 + Tinker has a numerical issue** unrelated to advantages — possibly token-level advantage broadcasting (`per_token_adv = adv / n_gen` — see `planner.py:402`) interacts badly with thinking-mode-off generations where the strategy span is short.
+
+### Comparison to `e4a0ce10` (no fix)
+
+| metric | `e4a0ce10` R3 (no fix) | `c4f76f38` R3 (all fixes) | improvement? |
+|---|---|---|---|
+| `pass_rate` | 0.082 | 0.113 | +38% (better) |
+| `avg_milestone` | 1.91 | 1.87 | ~ same |
+| `loss` | 0.7527 | 0.1217 | 6× lower (much better) |
+| `used` datums | 97 | 256 | 2.6× more (better) |
+| Trajectory shape | erratic, loss flying | stable | **better** |
+
+So the fixes did genuinely improve **the training dynamics** (stable loss, full sample utilization, no survivor inflation). They did not improve **the policy quality**.
+
+## Next-Experiment Recommendations
+
+In priority order:
+
+1. **Eval-only R0 (`num_rounds=1`)** — measure pass_rate of base Qwen3.5-27B over the 32 round-0 tasks **without any GRPO update**. This pins the noise floor: if base is 0.14 ± σ and σ is large (run-to-run task-sample variation), then R2-R4 declines may all be within sampling noise. ETA ~75 min, cost: one Tinker session (no actual training step).
+
+2. **`lr = 1e-7` 4-round run** — same config as `c4f76f38` but LR three orders of magnitude smaller. If pass_rate also declines, GRPO update direction is correct but step size cannot be small enough to avoid collapse → architectural issue. If pass_rate holds at 0.14, the GRPO update direction itself is wrong (gradient is anti-correlated with task success). ETA ~5h.
+
+3. **Read the Mastermind paper's evaluation methodology** — the paper's reported `Qwen3.5-27B + Mastermind` numbers should pin the achievable ceiling. If their training showed monotonic improvement, our setup has a discoverable gap. If their eval also plateaus at R0, our negative result is consistent with theirs.
+
+4. **Switch base model to a weaker one (Qwen2.5-7B)** — gives GRPO more headroom to learn. Cost: vLLM restart + new training session.
+
+5. **Accept current result, write as negative finding** — the paper's policy-loop section may need to honestly report that GRPO over Qwen3.5-27B + level1 task pool plateaus at the un-tuned baseline.
+
 ## Other Stabilizers Not Yet Applied
 
-If R1-R4 of run `1586c566` still show monotonic decline, the next-priority interventions (Codex's tier 2):
+If `c4f76f38` is the new floor and we want to push further:
 
-1. **`advantage_normalization`: `mean_only` → `clipped_std`** — divide by `max(σ, 0.3)` to dampen the m=7 winner-take-all effect on advantages.
-2. **`reward_compression`: `none` → `log1p`** — maps `r_milestone[7] = 12` → `2.56`, narrows the m=7 outlier blast radius.
-3. **`learning_rate`: `1e-5` → `5e-6`** — smaller PPO step.
-
-The order matters: `clipped_std` is a stat-level fix, `log1p` is a reward-level fix, `lr` is an optimizer-level fix. If the survivor-bias fix doesn't land R1-R4 reward stable, the next likely culprit is the m=7 outlier amplifying advantages via mean_only.
+1. **Per-token advantage broadcast (`planner.py:402`)** — currently `per_token_adv = adv / n_gen`. Some PPO implementations apply the advantage uniformly without the n_gen normalization. Worth checking against tinker_cookbook.rl.train.train_step.
+2. **`max_strategy_tokens`: 4096 → 2048** — caps the verbosity tail more aggressively, reducing the fraction of rollouts that hit `max_tokens` without producing a usable strategy.
+3. **APRIL `K_min`: 5 → 3** — relax the per-task completion threshold; with the survivor-bias fix this is no longer about gradient signal (cancelled count anyway), only about whether the early-stop heuristic fires before wall budget.
 
 ## Other Bugs Fixed Along The Way
 
@@ -157,6 +254,4 @@ The order matters: `clipped_std` is a stat-level fix, `log1p` is a reward-level 
 
 ## Currently Running
 
-Run `1586c566` started 2026-04-27 02:41 UTC+8. R1 baseline expected to match prior runs (`pass_rate ≈ 0.141`, `avg_milestone ≈ 2.21`) since same base policy + seed. R2 is the first round whose result is informative — if it matches R2 of `e4a0ce10` (0.121, dropping), survivor-bias was not the only issue. If it stabilizes or improves, the fix worked.
-
-R1 metrics ETA: ~03:55 UTC+8 (32 min generation + 40 min execution + 3 min GRPO step).
+Nothing. `c4f76f38` finished 2026-04-28 09:33 UTC+8 with the trajectory `0.145 → 0.133 → 0.113 → 0.031`. vLLM is still loaded on `:8001` (idle, ready for the next run). Tinker session for `c4f76f38` is closed; checkpoints saved at `/data/cybergym_data/cybergym-train-data/c4f76f38/checkpoints/round_{000..003}`.
