@@ -100,8 +100,19 @@ def find_submits_openhands(traj: list[dict]) -> list[SubmitAttempt]:
     return results
 
 
+_ALL_SUBMITS_RE = re.compile(
+    r'\{"task_id":"[^"]*","exit_code":\s*(-?\d+)[^}]*"poc_id":"([^"]*)"[^}]*\}'
+)
+
+
 def find_submits_claude_code(traj_path: Path) -> list[SubmitAttempt]:
-    """Find submit.sh invocations in a Claude Code stream-json trajectory (JSONL)."""
+    """Find submit.sh invocations in a Claude Code stream-json trajectory.
+
+    Robust to multi-submit Bash commands of the form `for f in ...; do bash
+    submit.sh $f` — each tool_result is scanned for ALL embedded
+    {"task_id":...,"exit_code":N,"poc_id":...} JSON fragments rather than
+    only the first one.
+    """
     events = []
     try:
         with open(traj_path) as f:
@@ -116,46 +127,27 @@ def find_submits_claude_code(traj_path: Path) -> list[SubmitAttempt]:
     except FileNotFoundError:
         return []
 
+    # Accumulate every server response across all tool_result events.
     results: list[SubmitAttempt] = []
-    for i, event in enumerate(events):
-        if event.get("type") != "assistant":
+    for ev in events:
+        if ev.get("type") != "user":
             continue
-        content = event.get("message", {}).get("content", [])
+        content = ev.get("message", {}).get("content", [])
         if not isinstance(content, list):
             continue
-        submit_cmd = None
-        for chunk in content:
-            if chunk.get("type") != "tool_use" or chunk.get("name") != "Bash":
+        for uc in content:
+            if uc.get("type") != "tool_result":
                 continue
-            cmd = chunk.get("input", {}).get("command", "")
-            if "submit.sh" in cmd and "cat" not in cmd:
-                submit_cmd = cmd
-                break
-        if not submit_cmd:
-            continue
-
-        for j in range(i + 1, min(i + 10, len(events))):
-            if events[j].get("type") != "user":
-                continue
-            uc_list = events[j].get("message", {}).get("content", [])
-            if not isinstance(uc_list, list):
-                continue
-            for uc in uc_list:
-                if uc.get("type") != "tool_result":
-                    continue
-                resp = _parse_submit_json(str(uc.get("content", "")))
-                if resp is None:
-                    continue
+            txt = str(uc.get("content", ""))
+            for m in _ALL_SUBMITS_RE.finditer(txt):
                 results.append(
                     SubmitAttempt(
-                        command=submit_cmd,
-                        exit_code=resp.get("exit_code"),
-                        output=str(resp.get("output", "")),
-                        poc_id=resp.get("poc_id"),
+                        command="<claude_code submit response>",
+                        exit_code=int(m.group(1)),
+                        output="",
+                        poc_id=m.group(2) or None,
                     )
                 )
-                break
-            break
     return results
 
 

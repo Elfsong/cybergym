@@ -88,6 +88,44 @@ def _rollout_quality_metrics(
     }
 
 
+def _update_guard_reason(
+    rewarded: list[tuple[StrategyToExecute, float, int]],
+    config: Config,
+) -> tuple[str | None, dict]:
+    """Return a skip reason when the train batch has too little task signal."""
+    milestones = [milestone for _, _, milestone in rewarded]
+    n = max(len(milestones), 1)
+    nonzero_rate = sum(1 for milestone in milestones if milestone > 0) / n
+
+    task_ids = sorted({strategy.task_id for strategy, _, _ in rewarded})
+    progressed_tasks = {
+        strategy.task_id
+        for strategy, _, milestone in rewarded
+        if milestone > 0
+    }
+    progress_task_rate = len(progressed_tasks) / max(len(task_ids), 1)
+
+    reason = None
+    min_nonzero = getattr(config, "min_nonzero_milestone_rate_for_update", 0.0)
+    min_task = getattr(config, "min_progress_task_rate_for_update", 0.0)
+    if min_nonzero > 0 and nonzero_rate < min_nonzero:
+        reason = (
+            f"nonzero_milestone_rate={nonzero_rate:.3f} "
+            f"< {min_nonzero:.3f}"
+        )
+    elif min_task > 0 and progress_task_rate < min_task:
+        reason = (
+            f"progress_task_rate={progress_task_rate:.3f} "
+            f"< {min_task:.3f}"
+        )
+
+    return reason, {
+        "nonzero_milestone_rate": nonzero_rate,
+        "progress_task_rate": progress_task_rate,
+        "n_progressed_tasks": len(progressed_tasks),
+    }
+
+
 async def run_validation_round(
     label: str,
     planner: Planner,
@@ -394,11 +432,15 @@ async def run_round(
             f"GRPO group stats: keeping {n_cancelled}/{len(cancelled_mask)} "
             f"APRIL-cancelled rollouts as low-reward samples"
         )
+    update_skip_reason, update_guard_metrics = _update_guard_reason(rewarded, config)
+    if update_skip_reason:
+        logger.warning(f"GRPO update guard fired: {update_skip_reason}")
     metrics = await planner.grpo_update(
         [(strategy, reward) for strategy, reward, _ in rewarded],
         round_idx=round_idx,
         cancelled_mask=cancelled_mask,
         milestones=[milestone for _, _, milestone in rewarded],
+        force_skip_update_reason=update_skip_reason,
     )
 
     if archive is not None and config.archive_enabled:
@@ -449,6 +491,7 @@ async def run_round(
     think_lens = [strategy.n_thinking_tokens for strategy, _, _ in rewarded]
     strat_lens = [strategy.n_strategy_tokens for strategy, _, _ in rewarded]
     metrics.update(quality_metrics)
+    metrics.update(update_guard_metrics)
     metrics.update(
         {
             "round": round_idx,

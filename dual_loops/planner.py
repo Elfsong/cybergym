@@ -567,6 +567,7 @@ class Planner:
         eps: float = 1e-8,
         cancelled_mask: list[bool] | None = None,
         milestones: list[int] | None = None,
+        force_skip_update_reason: str | None = None,
     ) -> dict:
         """Compute GRPO advantages per-task-group, build Datums, run one
         pipelined forward_backward + optim_step update per mini-batch
@@ -593,6 +594,22 @@ class Planner:
             cancelled_mask=cancelled_mask,
             milestones=milestones,
         )
+
+        if force_skip_update_reason:
+            logger.warning(
+                "GRPO update skipped by stability guard: "
+                f"{force_skip_update_reason}"
+            )
+            metrics.update({
+                "num_substeps": 0,
+                "mini_batch_size": self.config.mini_batch_size,
+                "substep_datum_counts": [],
+                "substep_metrics": [],
+                "mean_fb_metrics": {},
+                "grpo_skipped": True,
+                "skip_reason": force_skip_update_reason,
+            })
+            return metrics
 
         if not task_datums:
             logger.warning(
@@ -660,9 +677,16 @@ class Planner:
         loss_fn_name = getattr(self.config, "loss_fn_name", "importance_sampling")
         loss_fn_config: dict | None = None
         if loss_fn_name == "ppo":
+            low = self.config.ppo_clip_low_threshold
+            high = self.config.ppo_clip_high_threshold
+            assert 0.0 < low < 1.0 < high, (
+                f"PPO clip bounds misconfigured: low={low}, high={high}. "
+                "Tinker treats these as absolute ratio bounds, not epsilons; "
+                "expected low in (0,1) and high > 1 (e.g. 0.8, 1.2 for ε=0.2)."
+            )
             loss_fn_config = {
-                "clip_low_threshold":  self.config.ppo_clip_low_threshold,
-                "clip_high_threshold": self.config.ppo_clip_high_threshold,
+                "clip_low_threshold":  low,
+                "clip_high_threshold": high,
             }
 
         # Enqueue first batch

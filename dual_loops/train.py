@@ -115,16 +115,145 @@ def _select_validation_task_ids(config: Config, all_task_ids: list[str]) -> list
         task_ids = _load_json_task_ids(existing_path)
         if task_ids:
             return task_ids
-    if config.validation_tasks_file is not None:
-        task_ids = parse_tasks_file(config.validation_tasks_file)
-        if config.validation_batch_size > 0:
-            task_ids = task_ids[: config.validation_batch_size]
-        return task_ids
     if config.validation_batch_size <= 0:
         return []
+    if config.validation_tasks_file is not None:
+        task_ids = parse_tasks_file(config.validation_tasks_file)
+        return task_ids[: config.validation_batch_size]
     rng = random.Random(config.validation_seed)
     n = min(config.validation_batch_size, len(all_task_ids))
     return rng.sample(all_task_ids, n)
+
+
+def _metric_value(metrics: dict, metric: str) -> float | None:
+    value = metrics.get(metric)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_fraction(value: float, name: str) -> float:
+    """Accept either 0..1 fractions or 0..100 percentages."""
+    if value > 1.0:
+        value = value / 100.0
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"{name} must be between 0 and 1, or 0 and 100 percent")
+    return value
+
+
+def _load_best_validation(run_dir: Path) -> dict | None:
+    path = run_dir / "best_validation.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        logger.warning(f"Could not load best validation from {path}")
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _update_best_validation(
+    config: Config,
+    round_idx: int,
+    eval_metrics: dict,
+    train_metrics: dict,
+) -> dict | None:
+    metric = config.early_stop_metric
+    current = _metric_value(eval_metrics, metric)
+    if current is None:
+        logger.warning(f"Validation metric {metric!r} missing; cannot update best")
+        return _load_best_validation(config.output_dir)
+
+    previous = _load_best_validation(config.output_dir)
+    previous_value = (
+        float(previous["value"])
+        if previous and previous.get("metric") == metric and "value" in previous
+        else None
+    )
+    if (
+        previous_value is not None
+        and current <= previous_value + config.early_stop_min_delta
+    ):
+        return previous
+
+    best = {
+        "metric": metric,
+        "value": current,
+        "round": round_idx,
+        "label": eval_metrics.get("label"),
+        "tinker_checkpoint": train_metrics.get("tinker_checkpoint"),
+        "checkpoint_dir": str(config.checkpoint_dir / f"round_{round_idx:03d}"),
+        "rollout_pass_rate": eval_metrics.get("rollout_pass_rate"),
+        "task_pass_at_n": eval_metrics.get("task_pass_at_n"),
+        "avg_milestone": eval_metrics.get("avg_milestone"),
+    }
+    save_json(best, config.output_dir / "best_validation.json")
+    logger.info(
+        f"New best validation: {metric}={current:.4f} at round {round_idx}"
+    )
+    return best
+
+
+def _validation_stop_reason(validation_metrics: list[dict], config: Config) -> str | None:
+    if not config.early_stop_on_validation:
+        return None
+
+    metric = config.early_stop_metric
+    baseline = next(
+        (
+            _metric_value(metrics, metric)
+            for metrics in validation_metrics
+            if metrics.get("round") == -1
+        ),
+        None,
+    )
+    round_values = [
+        (int(metrics["round"]), value)
+        for metrics in validation_metrics
+        if metrics.get("round", -1) >= 0
+        for value in [_metric_value(metrics, metric)]
+        if value is not None
+    ]
+    if not round_values:
+        return None
+
+    latest_round, latest_value = round_values[-1]
+    if (
+        baseline is not None
+        and latest_value + config.early_stop_baseline_tolerance < baseline
+    ):
+        return (
+            f"{metric}={latest_value:.4f} at round {latest_round} fell below "
+            f"pretrain baseline {baseline:.4f}"
+        )
+
+    patience = max(config.early_stop_patience, 0)
+    if patience <= 0:
+        return None
+
+    best = float("-inf")
+    stale = 0
+    best_round = -1
+    for round_idx, value in round_values:
+        if value > best + config.early_stop_min_delta:
+            best = value
+            best_round = round_idx
+            stale = 0
+        else:
+            stale += 1
+
+    if stale >= patience:
+        return (
+            f"{metric} has not improved for {stale} validation rounds "
+            f"(best {best:.4f} at round {best_round}, latest "
+            f"{latest_value:.4f} at round {latest_round})"
+        )
+    return None
 
 
 async def train(config: Config, resume_from: Path | None = None) -> None:
@@ -158,6 +287,21 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
         f"Reflection judge: {config.judge_model} @ {config.judge_base_url} | "
         f"λ={config.lambda_adherence}, judge_archive_only={config.judge_archive_only}, "
         f"γ_t={config.gamma_thinking}, γ_s={config.gamma_strategy}"
+    )
+    logger.info(
+        f"APRIL: round_max_wall={config.executor_round_max_wall_seconds}s, "
+        f"completion_threshold={config.executor_completion_threshold:.0%}, "
+        f"per_task_completion_fraction="
+        f"{config.executor_min_rollout_fraction_per_task:.1%}, "
+        f"round_min_wall={config.executor_round_min_wall_seconds}s"
+    )
+    logger.info(
+        f"Stability guards: min_nonzero_milestone_rate="
+        f"{config.min_nonzero_milestone_rate_for_update}, "
+        f"min_progress_task_rate={config.min_progress_task_rate_for_update}, "
+        f"early_stop_on_validation={config.early_stop_on_validation}, "
+        f"early_stop_metric={config.early_stop_metric}, "
+        f"patience={config.early_stop_patience}"
     )
     if config.judge_archive_only and config.lambda_adherence > 0.0:
         logger.info(
@@ -246,6 +390,7 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
             rng,
             batch_ids=fixed_train_task_ids,
         )
+        stop_reason: str | None = None
         if (
             validation_task_ids
             and config.validation_every > 0
@@ -262,7 +407,22 @@ async def train(config: Config, resume_from: Path | None = None) -> None:
             save_json(metrics, config.output_dir / f"round_{round_idx:03d}" / "metrics.json")
             validation_metrics.append({"round": round_idx, **eval_metrics})
             save_json(validation_metrics, config.output_dir / "validation_metrics.json")
+            _update_best_validation(config, round_idx, eval_metrics, metrics)
+            stop_reason = _validation_stop_reason(validation_metrics, config)
+            if stop_reason:
+                early_stop = {
+                    "triggered": True,
+                    "round": round_idx,
+                    "reason": stop_reason,
+                    "metric": config.early_stop_metric,
+                }
+                metrics["early_stop"] = early_stop
+                save_json(metrics, config.output_dir / f"round_{round_idx:03d}" / "metrics.json")
+                save_json(early_stop, config.output_dir / "early_stop.json")
+                logger.warning(f"Early stopping triggered: {stop_reason}")
         round_metrics.append(metrics)
+        if stop_reason:
+            break
 
     save_json(round_metrics, config.output_dir / "all_metrics.json")
     logger.info("=== Training complete ===")
@@ -386,6 +546,18 @@ def main() -> None:
         help="Allow length/reward tie-breakers to train even when all milestones match.",
     )
     parser.set_defaults(skip_uniform_milestone_groups=None)
+    parser.add_argument(
+        "--min-nonzero-milestone-rate-for-update",
+        type=float,
+        default=None,
+        help="Skip GRPO update when the rollout fraction with milestone > 0 is below this value. Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--min-progress-task-rate-for-update",
+        type=float,
+        default=None,
+        help="Skip GRPO update when the task fraction with any milestone > 0 is below this value. Set 0 to disable.",
+    )
     parser.add_argument("--planner-parallel", type=int, default=None)
     parser.add_argument("--judge-parallel", type=int, default=None)
     parser.add_argument("--executor-parallel", type=int, default=None)
@@ -393,6 +565,20 @@ def main() -> None:
     parser.add_argument("--executor-base-url", type=str, default=None)
     parser.add_argument("--executor-api-key", type=str, default=None)
     parser.add_argument("--executor-timeout", type=int, default=None)
+    parser.add_argument("--executor-round-max-wall-seconds", type=int, default=None)
+    parser.add_argument(
+        "--executor-completion-threshold",
+        type=float,
+        default=None,
+        help="Fraction or percent of tasks that must meet the per-task rollout threshold before APRIL early-stops.",
+    )
+    parser.add_argument(
+        "--executor-min-rollout-fraction-per-task",
+        type=float,
+        default=None,
+        help="Fraction or percent of each task's group_size rollouts that must complete before that task counts as complete.",
+    )
+    parser.add_argument("--executor-round-min-wall-seconds", type=int, default=None)
     parser.add_argument("--planner-base-url", type=str, default=None)
     parser.add_argument("--planner-api-key", type=str, default=None)
     parser.add_argument("--judge-model", type=str, default=None)
@@ -428,6 +614,23 @@ def main() -> None:
         action="store_true",
         help="Use archive retrieval during fixed validation. Default isolates policy-only eval.",
     )
+    parser.add_argument(
+        "--early-stop-on-validation",
+        dest="early_stop_on_validation",
+        action="store_true",
+        help="Stop after validation when the configured validation metric degrades.",
+    )
+    parser.add_argument(
+        "--no-early-stop-on-validation",
+        dest="early_stop_on_validation",
+        action="store_false",
+        help="Disable validation-based early stopping.",
+    )
+    parser.set_defaults(early_stop_on_validation=None)
+    parser.add_argument("--early-stop-metric", type=str, default=None)
+    parser.add_argument("--early-stop-patience", type=int, default=None)
+    parser.add_argument("--early-stop-min-delta", type=float, default=None)
+    parser.add_argument("--early-stop-baseline-tolerance", type=float, default=None)
     parser.add_argument("--train-root", type=Path, default=None)
     parser.add_argument("--resume-from", type=Path, default=None)
     args = parser.parse_args()
@@ -465,6 +668,20 @@ def main() -> None:
         config.executor_api_key = args.executor_api_key
     if args.executor_timeout is not None:
         config.executor_timeout = args.executor_timeout
+    if args.executor_round_max_wall_seconds is not None:
+        config.executor_round_max_wall_seconds = args.executor_round_max_wall_seconds
+    if args.executor_completion_threshold is not None:
+        config.executor_completion_threshold = _normalize_fraction(
+            args.executor_completion_threshold,
+            "--executor-completion-threshold",
+        )
+    if args.executor_min_rollout_fraction_per_task is not None:
+        config.executor_min_rollout_fraction_per_task = _normalize_fraction(
+            args.executor_min_rollout_fraction_per_task,
+            "--executor-min-rollout-fraction-per-task",
+        )
+    if args.executor_round_min_wall_seconds is not None:
+        config.executor_round_min_wall_seconds = args.executor_round_min_wall_seconds
     if args.planner_base_url is not None:
         config.planner_base_url = args.planner_base_url
     if args.planner_api_key is not None:
@@ -499,6 +716,14 @@ def main() -> None:
         config.reward_compression = args.reward_compression
     if args.skip_uniform_milestone_groups is not None:
         config.skip_uniform_milestone_groups = args.skip_uniform_milestone_groups
+    if args.min_nonzero_milestone_rate_for_update is not None:
+        config.min_nonzero_milestone_rate_for_update = (
+            args.min_nonzero_milestone_rate_for_update
+        )
+    if args.min_progress_task_rate_for_update is not None:
+        config.min_progress_task_rate_for_update = (
+            args.min_progress_task_rate_for_update
+        )
     if args.thinking_ref_tokens is not None:
         config.thinking_ref_tokens = args.thinking_ref_tokens
     if args.strategy_ref_tokens is not None:
@@ -526,6 +751,16 @@ def main() -> None:
         config.validation_every = args.validation_every
     if args.validation_use_archive:
         config.validation_use_archive = True
+    if args.early_stop_on_validation is not None:
+        config.early_stop_on_validation = args.early_stop_on_validation
+    if args.early_stop_metric is not None:
+        config.early_stop_metric = args.early_stop_metric
+    if args.early_stop_patience is not None:
+        config.early_stop_patience = args.early_stop_patience
+    if args.early_stop_min_delta is not None:
+        config.early_stop_min_delta = args.early_stop_min_delta
+    if args.early_stop_baseline_tolerance is not None:
+        config.early_stop_baseline_tolerance = args.early_stop_baseline_tolerance
 
     asyncio.run(train(config, resume_from=args.resume_from))
 

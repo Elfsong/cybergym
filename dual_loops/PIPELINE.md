@@ -121,6 +121,13 @@ results = execute_strategies(strategies, config, round_dir)
   `ThreadPoolExecutor`.
 - Hard ceiling per rollout: `executor_timeout` (default 2400s) + 300s grace;
   on timeout the whole process group is SIGKILLed.
+- APRIL can stop the whole executor phase early when either the round wall
+  budget is hit or enough tasks have enough completed rollouts. Both thresholds
+  are percentages: `executor_completion_threshold` is the fraction of tasks, and
+  `executor_min_rollout_fraction_per_task` is the fraction of each task's
+  `group_size` rollouts that must complete before that task counts. Defaults are
+  80% of tasks and 62.5% per task, so K=8 still means at least 5 completed
+  rollouts for a task.
 - Agent may write a partial trajectory from OpenHands event files — recovered
   by `_recover_trajectory` even if the subprocess died early.
 - Completed rollouts are streamed to `round_XXX/executions.jsonl` (see
@@ -164,12 +171,12 @@ metrics = planner.grpo_update(
 Inside `grpo_update`:
 
 1. **Group by task**, keeping APRIL-cancelled rollouts as low-reward samples.
-2. Compute per-rollout advantages. Default is `clipped_std`:
-   `(reward - mean) / max(std, advantage_std_floor)`.
+2. Compute per-rollout advantages. Default is `mean_only`:
+   `reward - group_mean`. `clipped_std` is still available for ablations.
 3. **Drop degenerate groups** (std ≈ 0, i.e. everyone got the same reward).
-   `--skip-uniform-milestone-groups` can also drop groups where every rollout
-   reached the same milestone, but this is off by default to match the
-   full-datum stabilizer run.
+   Uniform-milestone groups are also skipped by default so length/adherence
+   tie-breakers cannot move the policy when there is no task-progress signal.
+   Use `--train-uniform-milestone-groups` to restore the older behavior.
 4. For each surviving rollout, build a `tinker.Datum`:
    - `model_input = prompt + tokens[:-1]` (next-token prediction alignment)
    - `loss_fn_inputs = { target_tokens, logprobs, advantages }`
@@ -179,7 +186,10 @@ Inside `grpo_update`:
    awaiting substep *i*, so Tinker stays fully utilized.
 7. Loss is `ppo` with symmetric 0.2 clipping.
 
-Returns per-substep metrics and aggregate group stats.
+If the batch has too little task signal (`min_nonzero_milestone_rate_for_update`
+or `min_progress_task_rate_for_update`), the optimizer step is skipped and the
+round is checkpointed as a no-op update. Returns per-substep metrics and
+aggregate group stats.
 
 ### 5b. Optional fixed validation
 
@@ -188,7 +198,10 @@ runs a policy-only evaluation on the same validation task IDs before training
 (`pretrain`) and after each `validation_every` rounds. Validation uses
 `validation_samples_per_task` rollouts per task, writes
 `validation_task_ids.json`, `validation_metrics.json`, and per-label artifacts
-under `validation/<label>/`, and does not perform a GRPO update.
+under `validation/<label>/`, and does not perform a GRPO update. The trainer
+also writes `best_validation.json` with the best checkpoint reference and, by
+default, stops when the validation metric falls below the pretrain baseline or
+has not improved for `early_stop_patience` validation rounds.
 
 ### 6. Archive append
 

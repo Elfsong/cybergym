@@ -45,19 +45,30 @@ uv run python -m dual_loops.train \
   --num-rounds 12 \
   --batch-size 32 \
   --mini-batch-size 8 \
+  --group-size 8 \
   --validation-batch-size 32 \
   --validation-samples-per-task 8
 ```
 
-Current defaults match the stable post-noise-floor configuration: archive off,
-judge reward off, `learning_rate=5e-6`, `advantage_normalization=clipped_std`,
+Current defaults are intentionally conservative after `9cc99030`: archive off,
+judge reward off, `learning_rate=2e-6`, `grad_clip_norm=0.5`,
+`advantage_normalization=mean_only`, `gamma_strategy=0`,
 `reward_compression=log1p`, `max_strategy_tokens=2048`, and APRIL-cancelled
-rollouts kept in GRPO group statistics as low-reward samples.
+rollouts kept in GRPO group statistics as low-reward samples. Uniform-milestone
+groups are skipped by default, and a near-zero-progress training batch skips its
+optimizer step instead of learning from length/formatting noise.
 
 Training-batch `pass_rate` is measured on that round's sampled tasks before the
 GRPO update. Use fixed validation for the headline checkpoint curve; it evaluates
 each checkpoint on the same task IDs and removes the task-sample noise measured
-in `experiment_report.md`.
+in `experiment_report.md`. Validation now also writes `best_validation.json` and
+stops early by default when the selected metric stops improving.
+
+APRIL early-stop thresholds are percentage-based. `--executor-completion-threshold`
+is the fraction of tasks that must be complete, and
+`--executor-min-rollout-fraction-per-task` is the fraction of each task's
+`group_size` rollouts that must finish before that task counts. The parser
+accepts either `0.9` or `90`.
 
 ### Paired training-batch comparison
 ```bash

@@ -10,6 +10,7 @@ from __future__ import annotations
 import glob
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -493,8 +494,8 @@ def execute_strategies(
         return [r for r in results if r is not None]
 
     # APRIL early-stop bookkeeping. Per-task completed-rollout counter; the
-    # round can stop once a target fraction of tasks have at least K_min
-    # completed rollouts, OR when the wall-clock cap fires.
+    # round can stop once a target fraction of tasks have completed enough of
+    # their K rollouts, OR when the wall-clock cap fires.
     from collections import defaultdict
     task_completed: dict[str, int] = defaultdict(int)
     for r in done.values():
@@ -505,7 +506,11 @@ def execute_strategies(
     round_max_wall = config.executor_round_max_wall_seconds
     round_min_wall = config.executor_round_min_wall_seconds
     completion_threshold = config.executor_completion_threshold
-    K_min = config.executor_min_rollouts_per_task
+    per_task_completion_fraction = config.executor_min_rollout_fraction_per_task
+    per_task_min_completed_rollouts = min(
+        max(1, math.ceil(config.group_size * per_task_completion_fraction)),
+        max(config.group_size, 1),
+    )
     april_enabled = round_max_wall > 0
     stop_reason_box: list[str] = []  # mutable via closures
     stop_lock = threading.Lock()
@@ -554,18 +559,27 @@ def execute_strategies(
             return
         while not _STOP_EVENT.is_set():
             elapsed = time.monotonic() - round_start
-            tasks_with_kmin = sum(1 for c in task_completed.values() if c >= K_min)
+            tasks_with_kmin = sum(
+                1
+                for c in task_completed.values()
+                if c >= per_task_min_completed_rollouts
+            )
             frac_ok = tasks_with_kmin / max(n_tasks, 1)
             if elapsed >= round_max_wall:
                 _trigger_stop(
                     f"wall budget hit ({int(elapsed)}s ≥ {round_max_wall}s); "
-                    f"{tasks_with_kmin}/{n_tasks} tasks have ≥{K_min} rollouts (watchdog)"
+                    f"{tasks_with_kmin}/{n_tasks} tasks have "
+                    f"≥{per_task_min_completed_rollouts}/{config.group_size} "
+                    f"rollouts ({per_task_completion_fraction:.0%}) (watchdog)"
                 )
                 return
             if frac_ok >= completion_threshold and elapsed >= round_min_wall:
                 _trigger_stop(
                     f"completion threshold met "
                     f"({tasks_with_kmin}/{n_tasks}={frac_ok:.0%} ≥ {completion_threshold:.0%}) "
+                    f"with per-task threshold "
+                    f"≥{per_task_min_completed_rollouts}/{config.group_size} "
+                    f"({per_task_completion_fraction:.0%}) "
                     f"after {int(elapsed)}s (watchdog)"
                 )
                 return
@@ -614,17 +628,26 @@ def execute_strategies(
             # before the next watchdog tick.
             if april_enabled and not _STOP_EVENT.is_set():
                 elapsed = time.monotonic() - round_start
-                tasks_with_kmin = sum(1 for c in task_completed.values() if c >= K_min)
+                tasks_with_kmin = sum(
+                    1
+                    for c in task_completed.values()
+                    if c >= per_task_min_completed_rollouts
+                )
                 frac_ok = tasks_with_kmin / max(n_tasks, 1)
                 if elapsed >= round_max_wall:
                     _trigger_stop(
                         f"wall budget hit ({int(elapsed)}s ≥ {round_max_wall}s); "
-                        f"{tasks_with_kmin}/{n_tasks} tasks have ≥{K_min} rollouts"
+                        f"{tasks_with_kmin}/{n_tasks} tasks have "
+                        f"≥{per_task_min_completed_rollouts}/{config.group_size} "
+                        f"rollouts ({per_task_completion_fraction:.0%})"
                     )
                 elif frac_ok >= completion_threshold and elapsed >= round_min_wall:
                     _trigger_stop(
                         f"completion threshold met "
                         f"({tasks_with_kmin}/{n_tasks}={frac_ok:.0%} ≥ {completion_threshold:.0%}) "
+                        f"with per-task threshold "
+                        f"≥{per_task_min_completed_rollouts}/{config.group_size} "
+                        f"({per_task_completion_fraction:.0%}) "
                         f"after {int(elapsed)}s; cancelling tail"
                     )
 

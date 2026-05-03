@@ -51,7 +51,8 @@ class Config:
     executor_base_url: str = "http://localhost:8001/v1"
     executor_api_key:  str = "EMPTY"
     executor_parallel: int = 64   # 32 -> 48 -> 64: round 1 (run 2b7eb258) produced
-                                  # 12/48 tasks at K_min=5 with 70% APRIL cancel rate.
+                                  # 12/48 tasks at 5/8 per-task completion with
+                                  # 70% APRIL cancel rate.
                                   # Pairing with batch_size=32 keeps total rollouts at
                                   # 32×8=256, matched by 64-parallel × 40min ÷ 712s
                                   # median = 216 expected completions. Earlier 200-task
@@ -70,11 +71,15 @@ class Config:
     # status=CANCELLED) so downstream scoring sees them as failures.
     executor_round_max_wall_seconds: int = 2400       # hard cap per round
     executor_completion_threshold: float = 0.80       # fraction of tasks that need
-                                                      # ≥ K_min completed rollouts
-                                                      # to allow early termination
-    executor_min_rollouts_per_task: int = 5           # K_min (vs group_size=8);
-                                                      # below this a task is skipped
-                                                      # by the APRIL stop check
+                                                      # enough completed rollouts
+                                                      # to allow early termination.
+    executor_min_rollout_fraction_per_task: float = 0.625
+                                                      # Fraction of each task's
+                                                      # K rollouts that must
+                                                      # complete before that
+                                                      # task counts toward the
+                                                      # threshold. With K=8,
+                                                      # 0.625 => ceil(5.0) = 5.
     executor_round_min_wall_seconds: int = 600        # don't stop early in the first
                                                       # 10 min even if threshold met
                                                       # (avoids false-positive stops
@@ -102,14 +107,16 @@ class Config:
     mini_batch_size: int = 8         # task groups per GRPO mini-batch.
                                      # Substeps per round are derived: S = ceil(batch_size / mini_batch_size).
     grad_accum: int = 4
-    learning_rate: float = 5e-6           # peak LR; c4f76f38 stabilized PPO loss vs 1e-5.
+    learning_rate: float = 2e-6           # conservative peak LR; 5e-6 gave a
+                                          # strong round-0 lift but then policy
+                                          # collapse on 9cc99030.
     skip_grpo_update: bool = False        # Execute and score rollouts, but skip
                                           # forward_backward/optim_step. Useful
                                           # for no-op controls.
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
     adam_weight_decay: float = 0.01        # AdamW weight decay (Tinker default is 0.0)
-    grad_clip_norm: float = 1.0            # global grad-norm clip (Tinker default is 0.0 = disabled)
+    grad_clip_norm: float = 0.5            # global grad-norm clip (Tinker default is 0.0 = disabled)
     lr_schedule: str = "cosine"            # {"constant", "cosine"}
     lr_min_ratio: float = 0.1              # cosine floor: min_lr = learning_rate * lr_min_ratio
     lr_warmup_ratio: float = 0.10          # linear warmup over first lr_warmup_ratio * total_steps steps
@@ -134,22 +141,33 @@ class Config:
     # "ppo" adds ratio clipping; required once sub-steps per round push the
     # policy off the sampling distribution.
     loss_fn_name: str = "ppo"
-    ppo_clip_low_threshold: float = 0.2    # ε_low, passed to loss_fn_config
-    ppo_clip_high_threshold: float = 0.2   # ε_high, passed to loss_fn_config
+    ppo_clip_low_threshold: float = 0.8    # absolute ratio lower bound (1-ε, ε=0.2 PPO clip)
+    ppo_clip_high_threshold: float = 1.2   # absolute ratio upper bound (1+ε, ε=0.2 PPO clip)
 
     # --- Advantage normalization (GRPO) ---
     # "mean_std":    (r - μ) / (σ + eps)  — classic, noisy in small groups
     # "mean_only":   r - μ                 — Dr.GRPO; removes σ-driven variance
     # "clipped_std": (r - μ) / max(σ, floor) — compromise
-    advantage_normalization: str = "clipped_std"
-    advantage_std_floor: float = 0.3
-    skip_uniform_milestone_groups: bool = False
+    advantage_normalization: str = "mean_only"
+    advantage_std_floor: float = 1.0
+    skip_uniform_milestone_groups: bool = True
                                      # Ignore task groups whose rollout
                                      # milestones are all identical. This keeps
                                      # length tie-breakers from creating policy
                                      # gradients when there is no task-progress
-                                     # signal. Default stays OFF to match the
-                                     # full-datum c4f76f38 stabilizer run.
+                                     # signal. Default ON after 9cc99030 showed
+                                     # all-zero milestone groups can still move
+                                     # the policy through length-only reward.
+    min_nonzero_milestone_rate_for_update: float = 0.02
+                                     # Skip the optimizer step when fewer than
+                                     # this fraction of rollouts make any
+                                     # milestone progress. This prevents a hard
+                                     # or collapsed batch from training mostly
+                                     # on formatting/length noise.
+    min_progress_task_rate_for_update: float = 0.10
+                                     # Same guard at task granularity: at least
+                                     # this fraction of task groups need one
+                                     # rollout with milestone > 0.
 
     # --- Reward (milestone 0-7 → reward value) ---
     milestone_rewards: tuple = (0.0, 0.5, 1.5, 2.5, 4.0, 5.5, 8.0, 12.0)
@@ -164,15 +182,13 @@ class Config:
                                      # the cheaper mode that records adherence/insight
                                      # to the archive without feeding them into reward.
     gamma_thinking: float = 0.0      # reward weight on f_think = min(n_think/ref, 1)
-    gamma_strategy: float = 0.1      # reward weight on f_strat. NOTE: f_strat is now
+    gamma_strategy: float = 0.0      # reward weight on f_strat. NOTE: f_strat is now
                                      # max(0, 1 - n_strat/ref) — REWARDS SHORT strategies
-                                     # (was the saturating-up form rewarding long). With
-                                     # γ=0.1 and r_milestone ∈ [0..12], the strategy term
-                                     # is at most 0.1 — a tiebreaker between equal-
-                                     # milestone rollouts, not a primary signal. Counter
-                                     # to the verbosity / safety-refusal-loop tail
-                                     # observed in run 2b7eb258 (~5% of strategies hit
-                                     # max_strategy_tokens=4096).
+                                     # (was the saturating-up form rewarding long).
+                                     # Default OFF after 9cc99030: even a small
+                                     # length tiebreaker can train the model
+                                     # toward short, low-information strategies
+                                     # when milestone signal is sparse.
     thinking_ref_tokens: int = 3000  # saturation threshold for f_think (≈ observed p70)
     strategy_ref_tokens: int = 500   # f_strat zero-out threshold (rewards taper from 1
                                      # at n_strat=0 down to 0 at this cap). Observed
@@ -189,19 +205,34 @@ class Config:
     archive_tournament_size: int = 4
     archive_min_milestone: int = 3   # only retrieve strategies that submitted
 
-    # --- Fixed validation eval (disabled by default) ---
+    # --- Fixed validation eval + early stopping ---
     # Validation pass_rate is checkpoint eval on the same task subset each time.
     # It is distinct from a round's training-batch pass_rate, which is measured
     # before that round's GRPO update and on a fresh sampled batch.
-    validation_tasks_file: Path | None = None
-    validation_batch_size: int = 0       # 0 disables sampled validation unless
-                                         # validation_tasks_file is provided.
-    validation_samples_per_task: int = 0 # 0 => reuse group_size.
-    validation_group_size: int = 0       # Back-compat alias for
+    # Defaults to the held-out evaluation pool (TASKS_EVAL) so validation
+    # measures generalization rather than in-distribution recall on the train
+    # pool. Override with --validation-tasks-file to point elsewhere.
+    validation_tasks_file: Path | None = PROJECT_DIR / "TASKS_EVAL"
+    validation_batch_size: int = 32      # Number of tasks drawn from
+                                         # validation_tasks_file (capped to its
+                                         # length); 0 disables sampled
+                                         # validation. With the default
+                                         # TASKS_EVAL file, 32 picks a
+                                         # 32-task seed-stratified subset of
+                                         # the 200-task held-out set.
+    validation_samples_per_task: int = 8 # K rollouts per validation task
+                                         # (defaults to 8; pass 0 to reuse
+                                         # the training group_size).
+    validation_group_size: int = 8       # Back-compat alias for
                                          # validation_samples_per_task.
     validation_seed: int = 314159
     validation_every: int = 1
     validation_use_archive: bool = False
+    early_stop_on_validation: bool = True
+    early_stop_metric: str = "rollout_pass_rate"
+    early_stop_patience: int = 2
+    early_stop_min_delta: float = 0.0
+    early_stop_baseline_tolerance: float = 0.0
 
     # =========================================================================
     # Role 3 — Judge  (frozen base model → OpenAI-compatible chat endpoint)
