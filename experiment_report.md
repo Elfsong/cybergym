@@ -25,7 +25,8 @@ adv normalization "mean_only" (Dr.GRPO)
 lr               1e-5 cosine, warmup 10%, floor 0.1
 group K          8 rollouts/task
 seed             42  (per-round RNG = seed + round_idx → deterministic task sample)
-APRIL early-stop max_wall=2400s, threshold=0.80, K_min=5, min_wall=600s
+APRIL early-stop max_wall=2400s, task_threshold=0.80,
+per_task_rollout_fraction=0.625 (5/8 at K=8), min_wall=600s
 docker_stagger   5s between Popen calls (dockerd contention floor)
 cybergym         server://172.17.0.1:8666, level1 difficulty
 ```
@@ -175,7 +176,7 @@ This stacks **all four interventions** (survivor-bias fix from commit `43c3c53` 
 | `used` datums | **256** | **256** | **256** | **256** |
 | `degenerate` groups | **0/32** | **0/32** | **0/32** | **0/32** |
 | `substeps` (configured 4) | 4 | 4 | 4 | 4 |
-| `surviving_groups` (≥K_min=5) | 8 | 5 | 7 | 4 |
+| `surviving_groups` (≥5/8 completed) | 8 | 5 | 7 | 4 |
 | `cancelled` rollouts | 112 | 143 | 134 | 155 |
 
 ### What worked
@@ -342,7 +343,7 @@ If `c4f76f38` is the new floor and we want to push further:
 
 1. **Per-token advantage broadcast (`planner.py:402`)** — currently `per_token_adv = adv / n_gen`. Some PPO implementations apply the advantage uniformly without the n_gen normalization. Worth checking against tinker_cookbook.rl.train.train_step.
 2. **`max_strategy_tokens`: 4096 → 2048** — caps the verbosity tail more aggressively, reducing the fraction of rollouts that hit `max_tokens` without producing a usable strategy.
-3. **APRIL `K_min`: 5 → 3** — relax the per-task completion threshold; with the survivor-bias fix this is no longer about gradient signal (cancelled count anyway), only about whether the early-stop heuristic fires before wall budget.
+3. **APRIL per-task rollout fraction: 0.625 → 0.375** — relax the per-task completion threshold; with the survivor-bias fix this is no longer about gradient signal (cancelled count anyway), only about whether the early-stop heuristic fires before wall budget.
 
 ## Other Bugs Fixed Along The Way
 
@@ -357,4 +358,367 @@ If `c4f76f38` is the new floor and we want to push further:
 
 ## Currently Running
 
-Nothing. As of 2026-04-28 23:06 UTC+8 both `7e91a68e` (GRPO eval-only, finished 21:31 UTC+8) and `sonnet54_316fb18b` (Sonnet 54-task baseline, finished 21:00 UTC+8) have completed. vLLM is still loaded on `:8001` (idle, ready). Tinker sessions are closed; checkpoints saved per run dir under `/data/cybergym_data/cybergym-train-data/<run_id>/checkpoints/`.
+No GRPO training is currently running. `9cc99030` — 12-round GRPO training
+started 2026-04-28 23:44 UTC after PAGENT + Qwen3.6-Max-Preview baseline
+finished — was stopped on 2026-04-29 11:30 UTC during the round_004 executor
+phase, before `round_004/metrics.json` or a round_004 checkpoint was written.
+The partial round_004 OpenHands subprocesses were terminated and 60 runtime
+containers from that round's logs were removed. The last valid GRPO checkpoint
+is therefore `checkpoints/round_003/`; the best observed validation checkpoint
+remains `round_000`.
+
+### Run config
+
+```bash
+uv run python -m dual_loops.train \
+    --num-rounds 12          --batch-size 32           --mini-batch-size 8 \
+    --group-size 8           --validation-batch-size 32 --validation-samples-per-task 8 \
+    --validation-every 1     --no-archive               --lambda-adherence 0 \
+    --gamma-strategy 0.1     --advantage-normalization clipped_std \
+    --advantage-std-floor 0.3 --reward-compression log1p \
+    --learning-rate 5e-6     --max-strategy-tokens 2048 \
+    --planner-parallel 64    --executor-parallel 64
+```
+
+All four stabilizers from `c4f76f38` are active: `clipped_std` advantage with
+floor 0.3, `log1p` reward compression, lr=5e-6, survivor-bias fix.
+`gamma-strategy=0.1` re-enables the linear-down length penalty (`f_strat`)
+that the `c4f76f38` run had set to 0; this run tests whether penalising
+verbosity tightens the strategy-output distribution. Validation set (32
+tasks) is pinned via `validation_task_ids.json` at run start; sampled from
+TASKS_TRAIN with seed 314159 (this is an in-distribution sub-pool, not
+TASKS_EVAL — see "Validation set caveat" below).
+
+### Validation trajectory (the headline)
+
+| Round | rollout_pass_rate | task_pass@8 | avg_milestone | Δ vs prev |
+|------:|------------------:|------------:|--------------:|----------:|
+| pretrain  | **9.0%**  | 15.6% | 1.83 | — |
+| round_000 | **17.2%** | 21.9% | 2.34 | **+8.2 pp** ✅ |
+| round_001 | 14.5%     | 18.8% | 1.94 | −2.7 pp |
+| round_002 | 12.1%     | 25.0% | 2.11 | −2.4 pp |
+| round_003 | **8.2%**  | 15.6% | 1.85 | **−3.9 pp** 🔴 |
+
+**Round 0 produced a strong +8.2 pp lift, then four-round monotonic decline
+that fell below the pre-training baseline by round_003.** `task_pass@8` is
+noisier (a single +6 pp blip at round_002 against the rollout-level decline),
+which suggests the model is occasionally still finding the answer at K=8 even
+though the marginal-rollout pass rate has collapsed.
+
+### Per-round training-batch metrics
+
+| Train round | pass_rate | avg_ms | mean_reward | adv std | degenerate | substeps |
+|------:|----------:|-------:|------------:|--------:|-----------:|---------:|
+| 0 | 0.133 | 2.19 | 0.836 | 0.35 | 4/32 | 4 |
+| 1 | 0.078 | 1.64 | 0.622 | 0.39 | 5/32 | 4 |
+| 2 | 0.133 | 1.64 | 0.619 | 0.31 | 6/32 | 4 |
+| 3 | **0.000** | **0.00** | (collapsed) | — | 4/32 | 4 |
+
+**Round 3 train rolled all 256 rollouts into milestone 0** — every single
+rollout in 32 task groups returned 0 milestone. Combined with the validation
+drop the same round, this is a clear regression signal, not sample variance.
+APRIL cancellation rate was 89/256 (35%) for that round — lower than usual,
+so the cancellations are not the cause; the rollouts that DID complete also
+produced 0 milestone.
+
+### Cumulative resource use (so far, ~10h in)
+
+- Tinker forward+backward + sampling: ~4 rounds at 64 parallel sample/round
+  + 5 GRPO substeps each ≈ within Tinker's per-run budget envelope.
+- Local vLLM (Qwen3.5-27B at :8001): 64 parallel executor + 64 parallel
+  judge across 4 train rounds + 4 validation rounds = ~2400 active executor
+  rollouts dispatched. Cancellations 472/2048 (23%) overall — APRIL is
+  firing but not pathologically.
+- DashScope: $0 (planner uses Tinker, not DashScope; executor + judge are
+  local vLLM).
+
+### Validation set caveat
+
+The default `validation_tasks_file` was `None` at run start, which falls
+through to **sampling from `TASKS_TRAIN`** — i.e. the validation 32 tasks
+share their pool with the training 300. The cross-round comparison is still
+apples-to-apples (same 32 tasks every round), but the metric measures
+in-distribution generalization, not held-out test performance. Default
+patched after-the-fact (`config.py` now points at `TASKS_EVAL`, batch=50,
+samples_per_task=4) so future runs report held-out pass rate; the in-flight
+run is unaffected since `validation_task_ids.json` is pinned at run start.
+
+### Working diagnosis
+
+The most likely failure mode given the trajectory is **policy collapse**:
+the planner's strategy distribution is shrinking around a small set of
+high-reward tokens that yielded the round-0 lift, and over rounds 1-3
+those tokens drift to a degenerate strategy that no longer guides the
+executor at all (round_003 train milestone-0 across 100% of rollouts).
+Contributing factors:
+
+1. **`gamma-strategy=0.1`** — re-enables the length penalty that `c4f76f38`
+   had disabled. Drives the planner toward shorter strategies; in
+   conjunction with the milestone-only reward this rewards "say nothing
+   confidently" over "describe a hypothesis", and a 27B base under enough
+   length pressure can learn to emit minimal/empty plans.
+2. **`clipped_std` floor 0.3** — keeps advantage estimates from collapsing
+   to zero variance, but at low natural reward variance it inflates the
+   gradient on noisy reward differences. With `log1p` compression already
+   shrinking the milestone-7 signal relative to milestone-4/5, the floor
+   may be amplifying gradient on noise.
+3. **No archive (`--no-archive`)** — strategies don't accumulate
+   trajectory-derived corrections round-over-round. Once the policy enters
+   a bad attractor, there's no in-context-learning signal pulling it back.
+
+### Decision taken
+
+Stopped before round_004 could commit another GRPO update. Treat `round_000` as
+the best checkpoint from this run and `round_001`→`round_003` as a known-bad
+continuation. Do not resume `9cc99030` in-place unless the partial `round_004`
+directory is intentionally handled; a fresh conservative run is cleaner.
+
+Run output: `/data/cybergym_data/cybergym-train-data/9cc99030/`. Tinker
+checkpoints saved per round under `checkpoints/round_<N>/`.
+
+### Concurrent (non-GRPO) experiments running on this host
+
+1. **Claude Code + Claude Opus 4.7 on the seed-42 100-task sample** —
+   started 2026-04-29 07:56 UTC, split into 5 groups × 20 tasks. As of
+   11:19 UTC, 60/100 done with 43 PASSED (71.7% P/Total under the patched
+   parser; see "Result-parser bug" below). g0 used parallel=4 (~$40,
+   41 min); g1 chain-launched at 09:44 (parallel=4, 17 PASSED of 20); g2
+   chain-launched at 10:11 (parallel=8, 12 PASSED of 20). g3 and g4
+   scheduled for 15:11 and 20:11 (5h gap each, respects Anthropic Claude
+   Max rolling cap). Master scheduler PID 880511, PPID=1.
+2. **PAGENT + Qwen3.6-Max-Preview 200-task** — completed 2026-04-29 03:44
+   UTC. 76 PASSED at strict m=7 → 38.0% P/Total / 38.4% P/(P+F). Strict
+   same-200 vs unguided OpenHands+Max-Preview (78 PASSED, 39.0%): −1.0 pp
+   net displacement, consistent with the smaller-backbone trend. Numbers
+   already in `tab:main`.
+
+### Result-parser bug found and patched
+
+`run_eval_claude_code_tasks.py` and `dual_loops/milestones.py::find_submits_claude_code`
+both had a bug where multi-submit Bash commands of the form
+`for f in <hash1> <hash2> ...; do bash submit.sh $f` would only register
+the first server response from the resulting tool_result, missing later
+crash signals when the agent submitted several PoCs in a single Bash call.
+Smoke test went from 0/4 PASSED (reported) to 3/4 PASSED (re-scored).
+Sonnet 4.6's 200-task baseline goes from 53 → ~98 PASSED at the loose
+exit_code≠0 criterion (re-score still pending strict m=7 verify_fix
+recompute). Patches applied in-tree; `rescore_claude_code_trajectories.py`
+re-derives status from `trajectory.jsonl` for already-completed runs.
+
+### Stabilization patch applied
+
+The policy-loop defaults and trainer guards were patched after stopping
+`9cc99030`:
+
+- Conservative defaults: `learning_rate=2e-6`, `grad_clip_norm=0.5`,
+  `advantage_normalization=mean_only`, `gamma_strategy=0`,
+  `skip_uniform_milestone_groups=True`.
+- Update guard: skip the optimizer step when a train batch has too little task
+  signal (`min_nonzero_milestone_rate_for_update=0.02` or
+  `min_progress_task_rate_for_update=0.10`). This specifically prevents the
+  round_003 all-milestone-0 failure mode from turning length noise into a GRPO
+  update.
+- Validation guard: fixed validation now writes `best_validation.json` and
+  early-stops by default when `rollout_pass_rate` falls below the pretrain
+  baseline or fails to improve for two validation rounds.
+
+Recommended next run:
+
+```bash
+uv run python -m dual_loops.train \
+    --num-rounds 12 --batch-size 32 --mini-batch-size 8 --group-size 8 \
+    --validation-batch-size 32 --validation-samples-per-task 8 \
+    --validation-every 1 --no-archive --lambda-adherence 0 \
+    --reward-compression log1p --max-strategy-tokens 2048 \
+    --planner-parallel 64 --executor-parallel 64
+```
+
+---
+
+## PPO Clip Semantics Bug — Discovered 2026-04-29
+
+**All runs above ran with a fatal PPO clip configuration bug**, traced jointly with Codex (gpt-5.4) on 2026-04-29 (UTC+8 evening).
+
+### The bug
+
+`dual_loops/config.py:127-128` and `planner.py:680-683` passed `ppo_clip_low_threshold=0.2`, `ppo_clip_high_threshold=0.2` to Tinker's `loss_fn_config`. The comment treated these as ε values, but Tinker's PPO loss interprets them as **absolute ratio bounds** (verified at https://tinker-docs.thinkingmachines.ai/tinker/losses/ppo/, which gives `loss_fn_config={"clip_low_threshold": 0.9, "clip_high_threshold": 1.1}` as the worked example). With both bounds at 0.2, Tinker did `torch.clamp(ratio, 0.2, 0.2)` — every token's probability ratio was forced to a single point.
+
+### Bug fingerprint (verified retroactively across all GRPO runs)
+
+substep-0 metrics that should be `(clip_fraction≈0, ratio≈1, KL≈0)` were instead, across every GRPO run since the `loss_fn=ppo` path was added:
+
+| run | round | substep | ppo_clipped_fraction | ppo_mean_ratio | ppo_kl_div |
+|---|---|---|---|---|---|
+| `9cc99030` | 0-3 | 0 | **1.000** | 0.90 | 1.38 |
+| `394089dd` | 0-3 | 0 | **1.000** | 0.89 | 1.49 |
+
+### Mechanism: asymmetric one-sided unlikelihood training
+
+PPO objective with `min(ratio*A, clamp(ratio,0.2,0.2)*A) = min(ratio*A, 0.2*A)`:
+
+* **A > 0** (above-mean tokens, "good strategies"): `min` picks `0.2*A` (smaller). Gradient w.r.t. policy params from clipped term = 0. **Positive reinforcement is killed.**
+* **A < 0** (below-mean tokens, "bad strategies"): `min` picks `ratio*A` (more negative). Gradient flows in direction of decreasing ratio. **Negative unlikelihood training works normally.**
+
+This explains every observed pathology: monotone pass_rate decline, eventual all-milestone-0 collapse, the `9cc99030` R0 +8.2pp lift (one-time accidental anti-bad-sample pruning before entropy collapse).
+
+### The fix
+
+`dual_loops/config.py:127-128`:
+```python
+ppo_clip_low_threshold: float = 0.8    # absolute ratio lower bound (1-ε, ε=0.2 PPO clip)
+ppo_clip_high_threshold: float = 1.2   # absolute ratio upper bound (1+ε, ε=0.2 PPO clip)
+```
+
+`dual_loops/planner.py` adds an assert before the loss_fn_config build:
+```python
+assert 0.0 < low < 1.0 < high, ("PPO clip bounds misconfigured: ... "
+    "Tinker treats these as absolute ratio bounds, not epsilons; "
+    "expected low in (0,1) and high > 1 (e.g. 0.8, 1.2 for ε=0.2).")
+```
+
+### Documentation
+
+Full diagnosis and Codex/Claude debate trail: `dual_loops/GRPO_STABILITY_ANALYSIS.md`.
+
+---
+
+## Run `9de479df` — First Post-Fix Verification (6-round, fixed_train_batch=true)
+
+CLI used (only PPO clip bounds changed vs `394089dd`; fixed batch retained):
+
+```bash
+uv run python -m dual_loops.train \
+    --num-rounds 6 --batch-size 32 --mini-batch-size 8 --group-size 8 \
+    --fixed-train-batch \
+    --learning-rate 2e-6 --advantage-normalization mean_only \
+    --reward-compression none --gamma-strategy 0 --lambda-adherence 0 \
+    --no-archive --max-strategy-tokens 2048 \
+    --planner-parallel 64 --executor-parallel 48 \
+    --validation-tasks-file TASKS_EVAL --validation-batch-size 32 \
+    --validation-samples-per-task 4 --validation-every 1 \
+    --no-early-stop-on-validation
+```
+
+Validation pool: 32 tasks × 4 sample = 128 rollouts (binomial σ ≈ 4.3 pp). Uses TASKS_EVAL (proper held-out pool), not TASKS_TRAIN.
+
+### Validation trajectory
+
+| Round | rollout_pass_rate | task_pass@4 | avg_milestone | m=0 | m=7 | Δ vs pretrain |
+|------:|------------------:|------------:|--------------:|----:|----:|--------------:|
+| pretrain  | 34.4% | 56.2% | 4.67 | 21 | 44 | — |
+| round_000 | 39.1% | 56.2% | 5.20 | 11 | 50 | **+4.7 pp** |
+| round_001 | **40.6%** | **59.4%** | 5.01 | 17 | 52 | **+6.3 pp** ← peak |
+| round_002 | 38.3% | 50.0% | 4.48 | 29 | 49 | +3.9 pp |
+| round_003 | 39.8% | 59.4% | 4.95 | 16 | 51 | +5.5 pp |
+| round_004 | 37.5% | 56.2% | 4.75 | 23 | 48 | +3.1 pp |
+| round_005 | 36.7% | 50.0% | 4.92 | 17 | 47 | +2.3 pp |
+
+Trajectory shape: rapid lift R0→R1 → plateau R2-R3 around peak → slow decay R4-R5 ending −0.4pp from peak. Train↑val↓ overfit signal emerged at R4-R5: train pass_rate climbed 0.125→0.141→0.164 while val declined 0.398→0.375→0.367.
+
+### PPO health (across 9 substeps)
+
+`clip_fraction ∈ [0.086, 0.103]`, `mean_ratio ∈ [0.886, 0.905]`, `KL ∈ [1.27, 1.53]`, `loss/per_datum ∈ [-0.00035, +0.00184]`. Rock-solid; no collapse signal across all 6 rounds. R3 substep 0 loss went negative (-0.00035), the textbook PPO-converging sign.
+
+### Persistent ratio offset
+
+`mean_ratio ≈ 0.89` and `KL ≈ 1.4` persist even at substep 0 of every round. Diagnosed (Codex round 4) as Tinker sampling-backend vs training-backend numerical drift over ~1660-token strategy sequences. The fix's `[0.8, 1.2]` clip envelope happens to cover this drift — 90%+ of tokens fall inside the clip band, restoring symmetric PPO learning. Run was healthy.
+
+### Compared to `394089dd` (broken-PPO predecessor)
+
+| metric | `394089dd` (bug) | `9de479df` (fix) |
+|---|---|---|
+| substep-0 `clip_fraction` | 1.000 | 0.095 |
+| substep-0 `loss/per_datum` | 0.62-0.83 | 0.00184 |
+| pretrain → R0 lift | 0% (no movement) | +4.7 pp |
+| peak val pass_rate | 0.391 | 0.406 |
+
+The fix unblocked actual gradient flow. `loss/per_datum` dropped 327×.
+
+---
+
+## Run `a27f6a64` — Resample Train Batch (8-round, fixed_train_batch=false)
+
+Triggered by Codex round 4's diagnosis: `9de479df` R4-R5 train↑val↓ pattern points to fixed-batch overfit. Single config change vs `9de479df`: drop `--fixed-train-batch` so each round samples 32 fresh tasks from TASKS_TRAIN (300 tasks). Other defaults identical.
+
+### Pretrain baseline cross-run noise
+
+`a27f6a64` pretrain validation = **0.391** vs `9de479df` pretrain **0.344**, on the same 32-task EVAL pool with same `validation_seed=314159`. Δ = +4.7 pp (1.1σ at binomial σ=4.3pp). Source: Tinker LoRA random init is non-deterministic across runs (no exposed seed) — different initial LoRA weights → different strategies → different rollouts.
+
+This means **the headline +5 pp lift in `9de479df` may be inside the LoRA-init noise envelope** — i.e., GRPO is regressing the random initial LoRA toward some "average prompt-engineering" anchor, not learning new capability.
+
+### Validation trajectory
+
+| Round | rollout_pass_rate | task_pass@4 | avg_milestone | m=0 | m=7 | Δ vs THIS pretrain |
+|------:|------------------:|------------:|--------------:|----:|----:|-------------------:|
+| pretrain  | **39.1%** | 53.1% | 4.98 | 18 | 50 | — |
+| round_000 | 34.4% | 53.1% | 4.74 | 21 | 44 | −4.7 pp |
+| round_001 | 35.9% | 43.8% | 4.35 | 30 | 46 | −3.2 pp |
+| round_002 | 34.4% | 53.1% | 4.98 | 14 | 44 | −4.7 pp |
+| round_003 | 39.1% | 56.2% | 4.62 | 25 | 50 | 0.0 |
+| round_004 | 38.3% | 56.2% | 5.05 | 16 | 49 | −0.8 pp |
+| round_005 | 37.5% | **59.4%** | 4.78 | 22 | 48 | −1.6 pp |
+| round_006 | **39.8%** | **59.4%** | 4.81 | 22 | 51 | **+0.7 pp** ← peak |
+| round_007 | **31.3%** | 50.0% | 4.66 | 19 | 40 | **−7.8 pp** 🔴 sharp collapse |
+
+Trajectory shape: 3 sub-pretrain rounds → delayed monotone climb R3-R6 → R7 sharp collapse. Peak val matched pretrain only barely (+0.7 pp); peak `task_pass@4 = 0.594` matches `9de479df` R1 peak exactly.
+
+### Cross-run mirror image
+
+Both runs converged to similar peak metrics (`task_pass@4 ≈ 0.594`, val pass_rate ≈ 0.40), but the trajectories were perfect mirror images relative to each run's pretrain:
+
+```
+              R0     R1     R2     R3     R4     R5     R6     R7
+9de479df:    +4.7   +6.3   +3.9   +5.5   +3.1   +2.3    -      -
+a27f6a64:    -4.7   -3.2   -4.7   0.0    -0.8   -1.6   +0.7   -7.8
+```
+
+`9de479df` started below the run-population mean (pretrain 0.344) and was pulled up; `a27f6a64` started above (pretrain 0.391) and was pulled down. **GRPO is regressing both runs toward a common `~0.36-0.39` anchor, dominated by LoRA-init noise rather than task-progress signal.**
+
+### PPO health and the R6 grad_l2 spike
+
+PPO was healthy across all 8 rounds with one exception: **R6 substep 0 `unclipped_grad_l2:mean = 18.80`** vs the typical 1.93-4.48 across all other 13 substeps. Tinker's `grad_clip_norm=0.5` truncated the actual update, so the in-round optim step was bounded — but the spike marked a high-information-direction batch that, after one update, tipped R7 into the EVAL-pool bad neighborhood.
+
+| | clip | ratio | KL | loss/per_datum | grad_l2 |
+|---|---|---|---|---|---|
+| R0-R5 normal | 0.066-0.103 | 0.904-0.935 | 1.02-1.51 | -0.00034 ~ +0.00022 | 1.93-4.48 |
+| **R6 s0** | 0.089 | 0.912 | 1.37 | +0.00014 | **18.80** |
+| R7 s0 | 0.097 | 0.903 | 1.51 | +0.00028 | 2.74 (back to normal) |
+
+The grad_l2 spike was a single-round artifact; PPO ratio/clip/KL stayed healthy throughout. But the R6 update direction transferred badly, producing R7's −8.5 pp single-round drop on validation.
+
+### Effective batch under resample
+
+`used` datums (rollouts contributing to GRPO gradient after uniform-milestone skip): 32, 24, 48, 24, 88, 88, 56, 40 across R0-R7. Average ≈ 50, vs `9de479df` typical 64-80. Resample makes per-round task difficulty more variable — some rounds draw "all-uniform-milestone" batches with effective batch < 5 task groups.
+
+### Verdict
+
+* Codex round 5 prediction "R5 ≈ 0.39, range 0.37-0.41" was met (R5 = 0.375, R6 = 0.398).
+* Both runs exhibit late-round collapse: `9de479df` slow decay over 4 rounds (-3.9 pp from peak); `a27f6a64` single-round R6→R7 cliff (-8.5 pp).
+* Resample delays peak by 5 rounds (R1→R6) but ends at lower absolute pass_rate. Net: not a clear win.
+
+---
+
+## Joint Findings Across `9de479df` + `a27f6a64`
+
+1. **PPO clip semantics fix is necessary and correct**. 14 round × 9-15 substep accumulated empirical evidence shows healthy PPO behavior (clip_fraction < 0.11, KL < 1.55, ratio in [0.886, 0.935]).
+
+2. **The "real" learnable gain is small**. Both runs achieve `task_pass@4 = 0.594` (19/32 EVAL tasks at peak) vs pretrain 0.531-0.562. The +5 pp delta is robust to fixed/resample batch choice. Same 19 tasks getting unlocked from both directions suggests this is the genuine ceiling for `Qwen3.5-27B + rank-32 LoRA + frozen Qwen3.5-27B executor` configuration.
+
+3. **LoRA-init noise ≈ headline lift**. Cross-run pretrain variance (4.7 pp on the same EVAL 32 task pool, same seed) is comparable to the +5 pp peak lift. Statistical significance of "PPO fix works" requires multiple seeded re-runs to disentangle from init noise.
+
+4. **Late-round collapse is universal in this regime**. `9de479df` peak R1, decay R2-R5. `a27f6a64` delayed peak R6, single-round cliff R7. Both end below or near pretrain. **No KL-to-reference regularization** (the `kl_beta=0.01` in config.py is reserved but not wired into Tinker's loss path). PPO clip alone doesn't anchor the policy.
+
+5. **Strategy length unaffected**. Mean strategy tokens stayed in [1532, 1737] across 14 rounds, riding the 2048 cap. Verbose-rambling tail not addressed by any fix so far.
+
+### Best checkpoints
+
+* `9de479df/round_001/` (val 0.406, task@4 0.594) — fixed-batch peak
+* `a27f6a64/round_006/` (val 0.398, task@4 0.594) — resample peak
+
+Both produce equivalent `task_pass@4`. For paper write-up, pick whichever's val pass_rate confidence interval is preferred.
+
+---
+
+## Currently Running
+
+No GRPO training is currently running. Last completed: `a27f6a64` finished 2026-05-02 09:01 UTC+8.

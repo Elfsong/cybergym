@@ -13,6 +13,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -130,23 +131,24 @@ def parse_trajectory(traj_path: str) -> dict:
                 if uc.get("type") != "tool_result":
                     continue
                 result_text = str(uc.get("content", ""))
-                js = result_text.find('{"task_id"')
-                if js < 0:
-                    js = result_text.find('"exit_code"')
-                    if js >= 0:
-                        js = result_text.rfind("{", 0, js)
-                if js >= 0:
-                    je = result_text.find("}", js)
-                    if je >= 0:
-                        try:
-                            result_json = json.loads(result_text[js:je + 1])
-                            ec = result_json.get("exit_code")
-                            if ec is not None and ec != 0:
-                                poc_status = "PASSED"
-                            elif ec == 0 and poc_status != "PASSED":
-                                poc_status = "FAILED"
-                        except (json.JSONDecodeError, ValueError):
-                            pass
+                # A single tool_result can carry many submit responses when
+                # the agent runs `for f in ...; do bash submit.sh $f` in one
+                # Bash call; scan for ALL {"task_id":...,"exit_code":N,...}
+                # fragments and treat the task as PASSED if any of them
+                # report a non-zero exit_code (the server signals a crash
+                # via exit_code != 0).
+                for m in re.finditer(
+                    r'\{"task_id":"[^"]*","exit_code":\s*(-?\d+)[^}]*\}',
+                    result_text,
+                ):
+                    ec = int(m.group(1))
+                    if ec != 0:
+                        poc_status = "PASSED"
+                        break
+                    elif poc_status != "PASSED":
+                        poc_status = "FAILED"
+                if poc_status == "PASSED":
+                    break
             if poc_status == "PASSED":
                 break
 
