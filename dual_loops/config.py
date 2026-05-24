@@ -10,6 +10,39 @@ from uuid import uuid4
 PROJECT_DIR = Path(__file__).parent.parent
 
 
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or not key.replace("_", "").isalnum() or key[0].isdigit():
+            continue
+        if key in os.environ:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ[key] = value
+
+
+_load_env_file(PROJECT_DIR.parent / ".env")
+
+
+def _path_from_env(name: str, default: str | Path) -> Path:
+    return Path(os.getenv(name, str(default)))
+
+
+def _optional_path_from_env(name: str, default: str | Path | None) -> Path | None:
+    raw = os.getenv(name)
+    if raw is not None:
+        return Path(raw) if raw else None
+    return Path(default) if default is not None else None
+
+
 @dataclass
 class Config:
     # =========================================================================
@@ -20,9 +53,10 @@ class Config:
     # two roles — Tinker accepts an override base_url in the ServiceClient
     # constructor (it also honors TINKER_BASE_URL env var and falls back to
     # https://tinker.thinkingmachines.dev/services/tinker-prod when empty).
-    planner_model:    str = "Qwen/Qwen3.5-27B"
+    planner_model:    str = field(default_factory=lambda: os.getenv("PLANNER_MODEL", "Qwen/Qwen3.5-27B"))
     planner_rank:     int = 32
-    planner_base_url: str = ""      # Empty string → Tinker SDK default
+    planner_base_url: str = field(default_factory=lambda: os.getenv("TINKER_BASE_URL", ""))
+                                    # Empty string → Tinker SDK default
                                     # (https://tinker.thinkingmachines.dev/
                                     #  services/tinker-prod). Override for
                                     # dev/staging Tinker endpoints.
@@ -47,9 +81,14 @@ class Config:
     # For local vLLM the api_key field is a placeholder ("EMPTY") because
     # vLLM does not validate it — but LiteLLM requires the header to be
     # present, so we must set something.
-    executor_model:    str = "openai/Qwen/Qwen3.5-27B"
-    executor_base_url: str = "http://localhost:8001/v1"
-    executor_api_key:  str = "EMPTY"
+    executor_model:    str = field(default_factory=lambda: os.getenv("EXECUTOR_MODEL", "openai/Qwen/Qwen3.5-27B"))
+    executor_base_url: str = field(default_factory=lambda: os.getenv("EXECUTOR_BASE_URL", "http://localhost:8001/v1"))
+    executor_api_key:  str = field(default_factory=lambda: (
+        os.getenv("EXECUTOR_API_KEY")
+        or os.getenv("DASHSCOPE_API_KEY")
+        or os.getenv("LLM_API_KEY")
+        or "EMPTY"
+    ))
     executor_parallel: int = 64   # 32 -> 48 -> 64: round 1 (run 2b7eb258) produced
                                   # 12/48 tasks at 5/8 per-task completion with
                                   # 70% APRIL cancel rate.
@@ -243,9 +282,14 @@ class Config:
     # NOT be the LoRA-adapted planner: self-judging introduces non-stationary
     # reward signal and self-reinforcement bias. Override the triplet to point
     # at a different vLLM or DashScope, same pattern as the executor section.
-    judge_model:    str = "Qwen/Qwen3.5-27B"
-    judge_base_url: str = "http://localhost:8001/v1"
-    judge_api_key:  str = "EMPTY"
+    judge_model:    str = field(default_factory=lambda: os.getenv("JUDGE_MODEL", "Qwen/Qwen3.5-27B"))
+    judge_base_url: str = field(default_factory=lambda: os.getenv("JUDGE_BASE_URL", "http://localhost:8001/v1"))
+    judge_api_key:  str = field(default_factory=lambda: (
+        os.getenv("JUDGE_API_KEY")
+        or os.getenv("DASHSCOPE_API_KEY")
+        or os.getenv("LLM_API_KEY")
+        or "EMPTY"
+    ))
     judge_parallel: int = 64            # Max concurrent judge chat completions;
                                         # sibling of planner_parallel and
                                         # executor_parallel.
@@ -264,18 +308,31 @@ class Config:
                                         # truncate safety net.
 
     # --- Paths ---
-    data_dir: Path = Path("/data/cybergym_data/cybergym-benchmark-data/data")
-    train_root: Path = Path("/data/cybergym_data/cybergym-train-data")
+    data_dir: Path = field(default_factory=lambda: _path_from_env(
+        "CYBERGYM_DATA_DIR",
+        "/data/cybergym_data/cybergym-benchmark-data/data",
+    ))
+    train_root: Path = field(default_factory=lambda: _path_from_env(
+        "CYBERGYM_TRAIN_ROOT",
+        "/data/cybergym_data/cybergym-train-data",
+    ))
     # Shared experience pool seeded into every new run's Archive so training
     # doesn't cold-start. Set to None to disable. Per-run archives still write
     # only to their own output_dir; promote merged runs into this path manually.
-    global_archive_path: Path | None = Path(
-        "/data/cybergym_data/cybergym-train-data/_global/archive.jsonl"
-    )
-    tasks_file: Path = PROJECT_DIR / "TASKS_TRAIN"
-    server: str = "http://172.17.0.1:8666"
+    global_archive_path: Path | None = field(default_factory=lambda: _optional_path_from_env(
+        "CYBERGYM_GLOBAL_ARCHIVE_PATH",
+        "/data/cybergym_data/cybergym-train-data/_global/archive.jsonl",
+    ))
+    tasks_file: Path = field(default_factory=lambda: _path_from_env(
+        "CYBERGYM_TASKS_FILE",
+        PROJECT_DIR / "TASKS_TRAIN",
+    ))
+    server: str = field(default_factory=lambda: os.getenv(
+        "CYBERGYM_SERVER",
+        "http://172.17.0.1:8666",
+    ))
     cybergym_api_key: str = field(default_factory=lambda: os.getenv(
-        "CYBERGYM_API_KEY", "cybergym-030a0cd7-5908-4862-8ab9-91f2bfc7b56d"
+        "CYBERGYM_API_KEY", ""
     ))
     run_id: str = field(default_factory=lambda: uuid4().hex[:8])
 

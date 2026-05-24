@@ -13,8 +13,8 @@ authors = [
 dependencies = [
     "openai>=2.30.0",
     # Add your production dependencies here
-    "tinker>=0.18.1",
-    "tinker-cookbook>=0.3.0",
+    "tinker>=0.22.0",
+    "tinker-cookbook>=0.4.1",
     "torch>=2.10.0",
     "vllm>=0.19.0",
 ]

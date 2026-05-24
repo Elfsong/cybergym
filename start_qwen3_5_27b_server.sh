@@ -7,16 +7,24 @@
 #
 # Adjust CUDA_VISIBLE_DEVICES if running standalone.
 
-source /home/nvidia/Projects/cybergym/.venv/bin/activate
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
-export HF_HOME="/data/hf_home"
+VENV_PATH="${CYBERGYM_VENV:-.venv-mastermind}"
+if [ -f "$VENV_PATH/bin/activate" ]; then
+    source "$VENV_PATH/bin/activate"
+elif [ -f .venv/bin/activate ]; then
+    source .venv/bin/activate
+fi
 
-MODEL="Qwen/Qwen3.5-27B"
-PORT=8001
-TP=8
-MAX_MODEL_LEN=65536
-MAX_NUM_SEQS=72
-GPU_MEMORY_UTILIZATION=0.95
+export HF_HOME="${HF_HOME:-/mnt/bn/tiktok-mm-5/aiic/users/mz.du/cybergym_data/.cache/huggingface}"
+
+MODEL="${QWEN_VLLM_MODEL:-Qwen/Qwen3.5-27B}"
+PORT="${QWEN_VLLM_PORT:-8001}"
+TP="${QWEN_VLLM_TP:-8}"
+MAX_MODEL_LEN="${QWEN_VLLM_MAX_MODEL_LEN:-65536}"
+MAX_NUM_SEQS="${QWEN_VLLM_MAX_NUM_SEQS:-72}"
+GPU_MEMORY_UTILIZATION="${QWEN_VLLM_GPU_MEMORY_UTILIZATION:-0.95}"
 
 vllm serve "$MODEL" \
     --port "$PORT" \
